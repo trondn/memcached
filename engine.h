@@ -115,23 +115,16 @@ extern "C" {
                              const rel_time_t exptime, const int nbytes);
 
       /**
-       * Free / destroy an item structure.
-       *
-       * @param handle Pointer to the instance
-       * @param item Pointer to the item to be deleted
-       */
-      void (*item_free)(struct engine_handle* handle, item* item);
-
-      /**
-       * Free / destroy an item structure some time in the future
+       * Delete an item. Note that this function will release your
+       * handle to the item)
        *
        * @param handle Pointer to the instance
        * @param item Pointer to the item to be deleted
        * @param exptime When the item should be deleted
        */
-      ENGINE_ERROR_CODE (*item_defer_delete)(struct engine_handle* handle,
-                                             item* item,
-                                             const rel_time_t exptime);
+      ENGINE_ERROR_CODE (*item_delete)(struct engine_handle* handle,
+                                       item* item,
+                                       const rel_time_t exptime);
 
       /**
        * Release the the "refcount" to an object (so that the engine may modify

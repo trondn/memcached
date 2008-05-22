@@ -1438,18 +1438,11 @@ static void process_bin_delete(conn *c) {
     if (it) {
         uint64_t cas=swap64(req->message.header.request.cas);
         if (cas == 0 || cas == it->cas_id) {
-            if (exptime == 0) {
-                settings.engine->item_free(settings.engine, it);
-                /* release our reference */
-                settings.engine->item_release(settings.engine, it);
+            if (settings.engine->item_delete(settings.engine,
+                                             it, realtime(exptime)) == ENGINE_SUCCESS) {
                 write_bin_response(c, NULL, 0, 0, 0);
             } else {
-                if (settings.engine->item_defer_delete(settings.engine,
-                                                       it, realtime(exptime)) == ENGINE_SUCCESS) {
-                    write_bin_response(c, NULL, 0, 0, 0);
-                } else {
-                    write_bin_error(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
-                }
+                write_bin_error(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
             }
         } else {
             write_bin_error(c, PROTOCOL_BINARY_RESPONSE_KEY_EEXISTS, 0);
@@ -2119,19 +2112,11 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
 
     it = settings.engine->get(settings.engine, key, nkey);
     if (it) {
-        if (exptime == 0) {
-            settings.engine->item_free(settings.engine, it);
-            /* release our reference */
-            settings.engine->item_release(settings.engine, it);
+        if (settings.engine->item_delete(settings.engine, it,
+                                         realtime(exptime))== ENGINE_SUCCESS) {
             out_string(c, "DELETED");
         } else {
-            /* our reference will be transfered to the delete queue */
-            if (settings.engine->item_defer_delete(settings.engine, it,
-                                                   realtime(exptime)) == ENGINE_SUCCESS) {
-                out_string(c, "DELETED");
-            } else {
-                out_string(c, "SERVER_ERROR out of memory expanding delete queue");
-            }
+            out_string(c, "SERVER_ERROR out of memory expanding delete queue");
         }
     } else {
         out_string(c, "NOT_FOUND");

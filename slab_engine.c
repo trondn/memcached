@@ -52,7 +52,6 @@ static void slabber_destroy(struct engine_handle* handle);
 static item* slabber_item_allocate(struct engine_handle* handle, const void* key,
         const size_t nkey, const int flags, const rel_time_t exptime,
         const int nbytes);
-static void slabber_item_free(struct engine_handle* handle, item* item);
 static void slabber_item_release(struct engine_handle* handle, item* item);
 static item* slabber_get(struct engine_handle* handle, const void* key, const int nkey);
 static item* slabber_get_not_deleted(struct engine_handle* handle, const void* key, const int nkey, bool* delete_locked);
@@ -60,7 +59,7 @@ static char* slabber_get_stats(struct engine_handle* handle, const char* what_to
 static void slabber_update_lru_time(struct engine_handle* handle, item *item, const rel_time_t newtime);
 static ENGINE_ERROR_CODE slabber_store(struct engine_handle* handle, item* item, enum operation operation);
 static void slabber_flush(struct engine_handle* handle, time_t when);
-static ENGINE_ERROR_CODE slabber_item_defer_delete(struct engine_handle* handle, item* item, const rel_time_t exptime);
+static ENGINE_ERROR_CODE slabber_item_delete(struct engine_handle* handle, item* item, const rel_time_t exptime);
 static ENGINE_ERROR_CODE slabber_arithmetic(struct engine_handle* handle,
                                           const void* key,
                                           const int nkey,
@@ -98,8 +97,7 @@ ENGINE_HANDLE* create_instance(int version, ENGINE_ERROR_CODE* error) {
    handle->engine.destroy = slabber_destroy;
    handle->engine.item_size_ok = item_size_ok;
    handle->engine.item_allocate = slabber_item_allocate;
-   handle->engine.item_free = slabber_item_free;
-   handle->engine.item_defer_delete = slabber_item_defer_delete;
+   handle->engine.item_delete = slabber_item_delete;
    handle->engine.item_release = slabber_item_release;
    handle->engine.get = slabber_get;
    handle->engine.get_not_deleted = slabber_get_not_deleted;
@@ -248,16 +246,6 @@ static void slabber_item_release(struct engine_handle* handle, item* item) {
 }
 
 /*
- * Unlinks an item from the LRU and hashtable.
- */
-static void slabber_item_free(struct engine_handle* handle, item* item) {
-    struct slabber_engine* engine = get_handle(handle);
-    pthread_mutex_lock(&engine->cache_lock);
-    do_item_unlink(engine, item);
-    pthread_mutex_unlock(&engine->cache_lock);
-}
-
-/*
  * Moves an item to the back of the LRU queue.
  */
 static void slabber_update_lru_time(struct engine_handle* handle,
@@ -271,7 +259,7 @@ static void slabber_update_lru_time(struct engine_handle* handle,
 /*
  * Adds an item to the deferred-delete list so it can be reaped later.
  */
-static ENGINE_ERROR_CODE slabber_item_defer_delete(struct engine_handle* handle,
+static ENGINE_ERROR_CODE slabber_item_delete(struct engine_handle* handle,
                                                    item* it,
                                                    const rel_time_t exptime) {
 
@@ -280,28 +268,33 @@ static ENGINE_ERROR_CODE slabber_item_defer_delete(struct engine_handle* handle,
 
    pthread_mutex_lock(&se->cache_lock);
 
-   if (se->delcurr >= se->deltotal) {
-      item **new_delete = realloc(se->todelete,
-                                  sizeof(item *) * se->deltotal * 2);
-      if (new_delete) {
-         se->todelete = new_delete;
-         se->deltotal *= 2;
-      } else {
-         /*
-          * can't delete it immediately, user wants a delay,
-          * but we ran out of memory for the delete queue
-          */
-         /* release reference */
-         handle->item_release(handle, it);
-         ret = ENGINE_ENOMEM;
+   if (exptime == 0) {
+      do_item_unlink(se, it);
+      do_item_remove(se, it);
+   } else {
+      if (se->delcurr >= se->deltotal) {
+         item **new_delete = realloc(se->todelete,
+                                     sizeof(item *) * se->deltotal * 2);
+         if (new_delete) {
+            se->todelete = new_delete;
+            se->deltotal *= 2;
+         } else {
+            /*
+             * can't delete it immediately, user wants a delay,
+             * but we ran out of memory for the delete queue
+             */
+            /* release reference */
+            do_item_remove(se, it);
+            ret = ENGINE_ENOMEM;
+         }
       }
-   }
 
-   if (ret == ENGINE_SUCCESS) {
-      /* use its expiration time as its deletion time now */
-      it->exptime = exptime;
-      it->it_flags |= ITEM_DELETED;
-      se->todelete[se->delcurr++] = it;
+      if (ret == ENGINE_SUCCESS) {
+         /* use its expiration time as its deletion time now */
+         it->exptime = exptime;
+         it->it_flags |= ITEM_DELETED;
+         se->todelete[se->delcurr++] = it;
+      }
    }
 
    pthread_mutex_unlock(&se->cache_lock);
