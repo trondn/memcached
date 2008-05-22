@@ -75,9 +75,6 @@ static ENGINE_ERROR_CODE slabber_arithmetic(struct engine_handle* handle,
 
 extern bool item_size_ok(struct engine_handle* handle, const size_t nkey, const int flags, const size_t nbytes);
 
-
-struct slabber_engine trond_engine_handle;
-
 ENGINE_HANDLE* create_instance(int version, ENGINE_ERROR_CODE* error) {
    struct slabber_engine *handle;
    if (version != 1) {
