@@ -10,6 +10,8 @@
  * $Id$
  */
 #include "memcached.h"
+#include "slab_engine.h"
+
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -150,6 +152,8 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
 
 #ifndef DONT_PREALLOC_SLABS
     {
+        fprintf(stderr, "PREALLOCATE\n");
+
         char *pre_alloc = getenv("T_MEMD_SLABS_ALLOC");
 
         if (pre_alloc == NULL || atoi(pre_alloc) != 0) {
@@ -286,12 +290,11 @@ void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
 }
 
 /*@null@*/
-char* do_slabs_stats(int *buflen) {
+char* do_slabs_stats(void) {
     int i, total;
     char *buf = (char *)malloc(power_largest * 200 + 100);
     char *bufcurr = buf;
 
-    *buflen = 0;
     if (buf == NULL) return NULL;
 
     total = 0;
@@ -315,7 +318,7 @@ char* do_slabs_stats(int *buflen) {
     }
     bufcurr += sprintf(bufcurr, "STAT active_slabs %d\r\nSTAT total_malloced %llu\r\n", total, (unsigned long long)mem_malloced);
     bufcurr += sprintf(bufcurr, "END\r\n");
-    *buflen = bufcurr - buf;
+
     return buf;
 }
 

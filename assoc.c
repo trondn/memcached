@@ -14,6 +14,8 @@
  */
 
 #include "memcached.h"
+#include "slab_engine.h"
+
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -466,9 +468,6 @@ static item** old_hashtable = 0;
 /* Number of items in the hash table. */
 static unsigned int hash_items = 0;
 
-/* Flag: Are we in the middle of expanding now? */
-static bool expanding = false;
-
 /*
  * During expansion we migrate values with bucket granularity; this is how
  * far we've gotten so far. Ranges from 0 .. hashsize(hashpower - 1) - 1.
@@ -485,12 +484,13 @@ void assoc_init(void) {
     memset(primary_hashtable, 0, hash_size);
 }
 
-item *assoc_find(const char *key, const size_t nkey) {
+item *assoc_find(struct slabber_engine* engine, const char *key,
+                 const size_t nkey) {
     uint32_t hv = hash(key, nkey, 0);
     item *it;
     unsigned int oldbucket;
 
-    if (expanding &&
+    if (engine->assoc_expanding &&
         (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
     {
         it = old_hashtable[oldbucket];
@@ -511,12 +511,13 @@ item *assoc_find(const char *key, const size_t nkey) {
 /* returns the address of the item pointer before the key.  if *item == 0,
    the item wasn't found */
 
-static item** _hashitem_before (const char *key, const size_t nkey) {
+static item** _hashitem_before (struct slabber_engine* engine,
+                                const char *key, const size_t nkey) {
     uint32_t hv = hash(key, nkey, 0);
     item **pos;
     unsigned int oldbucket;
 
-    if (expanding &&
+    if (engine->assoc_expanding &&
         (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
     {
         pos = &old_hashtable[oldbucket];
@@ -531,17 +532,23 @@ static item** _hashitem_before (const char *key, const size_t nkey) {
 }
 
 /* grows the hashtable to the next power of 2. */
-static void assoc_expand(void) {
+static void assoc_expand(struct slabber_engine* engine) {
     old_hashtable = primary_hashtable;
 
     primary_hashtable = calloc(hashsize(hashpower + 1), sizeof(void *));
     if (primary_hashtable) {
-        if (settings.verbose > 1)
+        if (settings.verbose > 1) {
             fprintf(stderr, "Hash table expansion starting\n");
+        }
         hashpower++;
-        expanding = true;
+
+        assert(pthread_mutex_lock(&engine->maintenance_mutex) != -1);
+        engine->assoc_expanding = true;
+        pthread_cond_signal(&engine->maintenance_cond);
+        assert(pthread_mutex_unlock(&engine->maintenance_mutex) != -1);
+
         expand_bucket = 0;
-        do_assoc_move_next_bucket();
+        assoc_move_next_bucket(engine);
     } else {
         primary_hashtable = old_hashtable;
         /* Bad news, but we can keep running. */
@@ -549,11 +556,11 @@ static void assoc_expand(void) {
 }
 
 /* migrates the next bucket to the primary hashtable if we're expanding. */
-void do_assoc_move_next_bucket(void) {
+void assoc_move_next_bucket(struct slabber_engine* engine) {
     item *it, *next;
     int bucket;
 
-    if (expanding) {
+    if (engine->assoc_expanding) {
         for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
             next = it->h_next;
 
@@ -566,7 +573,7 @@ void do_assoc_move_next_bucket(void) {
 
         expand_bucket++;
         if (expand_bucket == hashsize(hashpower - 1)) {
-            expanding = false;
+            engine->assoc_expanding = false;
             free(old_hashtable);
             if (settings.verbose > 1)
                 fprintf(stderr, "Hash table expansion done\n");
@@ -575,14 +582,14 @@ void do_assoc_move_next_bucket(void) {
 }
 
 /* Note: this isn't an assoc_update.  The key must not already exist to call this */
-int assoc_insert(item *it) {
+int assoc_insert(struct slabber_engine* engine, item *it) {
     uint32_t hv;
     unsigned int oldbucket;
 
-    assert(assoc_find(ITEM_key(it), it->nkey) == 0);  /* shouldn't have duplicately named things defined */
+    assert(assoc_find(engine, ITEM_key(it), it->nkey) == 0);  /* shouldn't have duplicately named things defined */
 
     hv = hash(ITEM_key(it), it->nkey, 0);
-    if (expanding &&
+    if (engine->assoc_expanding &&
         (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
     {
         it->h_next = old_hashtable[oldbucket];
@@ -593,15 +600,16 @@ int assoc_insert(item *it) {
     }
 
     hash_items++;
-    if (! expanding && hash_items > (hashsize(hashpower) * 3) / 2) {
-        assoc_expand();
+    if (!engine->assoc_expanding && hash_items > (hashsize(hashpower) * 3) / 2) {
+        assoc_expand(engine);
     }
 
     return 1;
 }
 
-void assoc_delete(const char *key, const size_t nkey) {
-    item **before = _hashitem_before(key, nkey);
+void assoc_delete(struct slabber_engine* engine, const char *key,
+                  const size_t nkey) {
+    item **before = _hashitem_before(engine, key, nkey);
 
     if (*before) {
         item *nxt = (*before)->h_next;

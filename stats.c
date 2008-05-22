@@ -10,6 +10,8 @@
  * $Id$
  */
 #include "memcached.h"
+#include "slab_engine.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

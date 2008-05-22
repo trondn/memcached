@@ -112,6 +112,7 @@ dnl ----------------------------------------------------------------------------
 AC_SEARCH_LIBS(socket, socket)
 AC_SEARCH_LIBS(gethostbyname, nsl)
 AC_SEARCH_LIBS(mallinfo, malloc)
+AC_SEARCH_LIBS(dlopen, dl)
 
 AC_CHECK_FUNC(daemon,AC_DEFINE([HAVE_DAEMON],,[Define this if you have daemon()]),[AC_LIBOBJ(daemon)])
 

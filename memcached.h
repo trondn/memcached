@@ -85,6 +85,8 @@ struct stats {
 
 #define MAX_VERBOSITY_LEVEL 2
 
+struct engine_handle;
+
 struct settings {
     size_t maxbytes;
     int maxconns;
@@ -102,6 +104,7 @@ struct settings {
     int num_threads;        /* number of libevent threads to run */
     char prefix_delimiter;  /* character that marks a key prefix (for stats) */
     int detail_enabled;     /* nonzero if we're collecting detailed stats */
+    struct engine_handle *engine;
 };
 
 extern struct stats stats;
@@ -176,12 +179,8 @@ enum protocol {
 
 #define IS_UDP(x) (x == ascii_udp_prot)
 
-#define NREAD_ADD 1
-#define NREAD_SET 2
-#define NREAD_REPLACE 3
-#define NREAD_APPEND 4
-#define NREAD_PREPEND 5
-#define NREAD_CAS 6
+enum operation { NREAD_ADD = 1, NREAD_SET, NREAD_REPLACE, NREAD_APPEND, NREAD_PREPEND, NREAD_CAS };
+
 
 typedef struct conn conn;
 struct conn {
@@ -281,18 +280,14 @@ conn *do_conn_from_freelist();
 bool do_conn_add_to_freelist(conn *c);
 char *do_suffix_from_freelist();
 bool do_suffix_add_to_freelist(char *s);
-int do_defer_delete(item *item, time_t exptime);
-void do_run_deferred_deletes(void);
 char *do_add_delta(item *item, const bool incr, const int64_t delta, char *buf);
-int do_store_item(item *item, int comm, conn* c);
 conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum protocol prot, struct event_base *base);
 
 
 #include "stats.h"
-#include "slabs.h"
-#include "assoc.h"
-#include "items.h"
+#include "engine.h"
 
+rel_time_t realtime(const time_t exptime);
 
 /*
  * Functions such as the libevent-related calls that need to do cross-thread
@@ -306,33 +301,13 @@ int  dispatch_event_add(int thread, conn *c);
 void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size, enum protocol prot);
 
 /* Lock wrappers for cache functions that are called from main loop. */
-char *add_delta(item *item, const int incr, const int64_t delta, char *buf);
-void assoc_move_next_bucket(void);
 conn *conn_from_freelist(void);
 bool  conn_add_to_freelist(conn *c);
 char *suffix_from_freelist(void);
 bool  suffix_add_to_freelist(char *s);
-int defer_delete(item *it, time_t exptime);
 int   is_listen_thread(void);
-item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
-char *item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
-void  item_flush_expired(void);
-item *item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked);
-int   item_link(item *it);
-void  item_remove(item *it);
-int   item_replace(item *it, item *new_it);
-char *item_stats(int *bytes);
-char *item_stats_sizes(int *bytes);
-void  item_unlink(item *it);
-void  item_update(item *it);
-void  run_deferred_deletes(void);
-void *slabs_alloc(size_t size, unsigned int id);
-void  slabs_free(void *ptr, size_t size, unsigned int id);
-int   slabs_reassign(unsigned char srcid, unsigned char dstid);
-char *slabs_stats(int *buflen);
 void  STATS_LOCK(void);
 void  STATS_UNLOCK(void);
-int   store_item(item *item, int comm, conn *c);
 
 /* If supported, give compiler hints for branch prediction. */
 #if !defined(__GNUC__) || (__GNUC__ == 2 && __GNUC_MINOR__ < 96)

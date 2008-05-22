@@ -1,6 +1,7 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /* $Id$ */
 #include "memcached.h"
+#include "slab_engine.h"
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/signal.h>
@@ -85,17 +86,18 @@ static size_t item_make_header(const uint8_t nkey, const int flags, const int nb
 }
 
 /*@null@*/
-item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_time_t exptime, const int nbytes) {
+item *do_item_alloc(struct slabber_engine *engine, const void *key,
+                    const size_t nkey, const int flags,
+                    const rel_time_t exptime, const int nbytes) {
     uint8_t nsuffix;
     item *it;
     char suffix[40];
     size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
-
     unsigned int id = slabs_clsid(ntotal);
     if (id == 0)
         return 0;
 
-    it = slabs_alloc(ntotal, id);
+    it = slabs_alloc(engine, ntotal, id);
     if (it == 0) {
         int tries = 50;
         item *search;
@@ -129,11 +131,11 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
                     stats.evictions++;
                     STATS_UNLOCK();
                 }
-                do_item_unlink(search);
+                do_item_unlink(engine, search);
                 break;
             }
         }
-        it = slabs_alloc(ntotal, id);
+        it = slabs_alloc(engine, ntotal, id);
         if (it == 0) {
             itemstats[id].outofmemory++;
             return NULL;
@@ -159,7 +161,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags, const rel_tim
     return it;
 }
 
-void item_free(item *it) {
+void item_free(struct slabber_engine* engine, item *it) {
     size_t ntotal = ITEM_ntotal(it);
     unsigned int clsid;
     assert((it->it_flags & ITEM_LINKED) == 0);
@@ -172,14 +174,14 @@ void item_free(item *it) {
     it->slabs_clsid = 0;
     it->it_flags |= ITEM_SLABBED;
     DEBUG_REFCNT(it, 'F');
-    slabs_free(it, ntotal, clsid);
+    slabs_free(engine, it, ntotal, clsid);
 }
 
 /**
  * Returns true if an item will fit in the cache (its size does not exceed
  * the maximum for a cache entry.)
  */
-bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
+bool item_size_ok(struct engine_handle* handle, const size_t nkey, const int flags, const size_t nbytes) {
     char prefix[40];
     uint8_t nsuffix;
 
@@ -228,12 +230,12 @@ static void item_unlink_q(item *it) {
     return;
 }
 
-int do_item_link(item *it) {
+int do_item_link(struct slabber_engine* engine, item *it) {
     assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
     assert(it->nbytes < (1024 * 1024));  /* 1MB max size */
     it->it_flags |= ITEM_LINKED;
     it->time = current_time;
-    assoc_insert(it);
+    assoc_insert(engine, it);
 
     STATS_LOCK();
     stats.curr_bytes += ITEM_ntotal(it);
@@ -249,20 +251,20 @@ int do_item_link(item *it) {
     return 1;
 }
 
-void do_item_unlink(item *it) {
+void do_item_unlink(struct slabber_engine* engine, item *it) {
     if ((it->it_flags & ITEM_LINKED) != 0) {
         it->it_flags &= ~ITEM_LINKED;
         STATS_LOCK();
         stats.curr_bytes -= ITEM_ntotal(it);
         stats.curr_items -= 1;
         STATS_UNLOCK();
-        assoc_delete(ITEM_key(it), it->nkey);
+        assoc_delete(engine, ITEM_key(it), it->nkey);
         item_unlink_q(it);
-        if (it->refcount == 0) item_free(it);
+        if (it->refcount == 0) item_free(engine, it);
     }
 }
 
-void do_item_remove(item *it) {
+void do_item_remove(struct slabber_engine* engine, item *it) {
     assert((it->it_flags & ITEM_SLABBED) == 0);
     if (it->refcount != 0) {
         it->refcount--;
@@ -270,27 +272,27 @@ void do_item_remove(item *it) {
     }
     assert((it->it_flags & ITEM_DELETED) == 0 || it->refcount != 0);
     if (it->refcount == 0 && (it->it_flags & ITEM_LINKED) == 0) {
-        item_free(it);
+        item_free(engine, it);
     }
 }
 
-void do_item_update(item *it) {
+void do_item_update(struct slabber_engine* engine, item *it, const rel_time_t newtime) {
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((it->it_flags & ITEM_SLABBED) == 0);
 
         if ((it->it_flags & ITEM_LINKED) != 0) {
             item_unlink_q(it);
-            it->time = current_time;
+            it->time = newtime;
             item_link_q(it);
         }
     }
 }
 
-int do_item_replace(item *it, item *new_it) {
+int do_item_replace(struct slabber_engine* engine, item *it, item *new_it) {
     assert((it->it_flags & ITEM_SLABBED) == 0);
 
-    do_item_unlink(it);
-    return do_item_link(new_it);
+    do_item_unlink(engine, it);
+    return do_item_link(engine, new_it);
 }
 
 /*@null@*/
@@ -327,7 +329,7 @@ char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit
     return buffer;
 }
 
-char *do_item_stats(int *bytes) {
+char *do_item_stats(void) {
     size_t bufleft = (size_t) LARGEST_ID * 160;
     char *buffer = malloc(bufleft);
     char *bufcurr = buffer;
@@ -361,17 +363,17 @@ char *do_item_stats(int *bytes) {
     memcpy(bufcurr, "END\r\n", 6);
     bufcurr += 5;
 
-    *bytes = bufcurr - buffer;
     return buffer;
 }
 
 /** dumps out a list of objects of each size, with granularity of 32 bytes */
 /*@null@*/
-char* do_item_stats_sizes(int *bytes) {
+char* do_item_stats_sizes(void) {
     const int num_buckets = 32768;   /* max 1MB object, divided into 32 bytes size buckets */
     unsigned int *histogram = (unsigned int *)malloc((size_t)num_buckets * sizeof(int));
     char *buf = (char *)malloc(2 * 1024 * 1024); /* 2MB max response size */
     int i;
+    int bytes;
 
     if (histogram == 0 || buf == 0) {
         if (histogram) free(histogram);
@@ -393,27 +395,28 @@ char* do_item_stats_sizes(int *bytes) {
     }
 
     /* write the buffer */
-    *bytes = 0;
+    bytes = 0;
     for (i = 0; i < num_buckets; i++) {
         if (histogram[i] != 0) {
-            *bytes += sprintf(&buf[*bytes], "%d %u\r\n", i * 32, histogram[i]);
+            bytes += sprintf(&buf[bytes], "%d %u\r\n", i * 32, histogram[i]);
         }
     }
-    *bytes += sprintf(&buf[*bytes], "END\r\n");
+
+    sprintf(&buf[bytes], "END\r\n");
     free(histogram);
     return buf;
 }
 
 /** returns true if a deleted item's delete-locked-time is over, and it
     should be removed from the namespace */
-bool item_delete_lock_over (item *it) {
+bool item_delete_lock_over (const item *it) {
     assert(it->it_flags & ITEM_DELETED);
     return (current_time >= it->exptime);
 }
 
 /** wrapper around assoc_find which does the lazy expiration/deletion logic */
-item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_locked) {
-    item *it = assoc_find(key, nkey);
+item *do_item_get_notedeleted(struct slabber_engine* engine, const char *key, const size_t nkey, bool *delete_locked) {
+    item *it = assoc_find(engine, key, nkey);
     if (delete_locked) *delete_locked = false;
     if (it != NULL && (it->it_flags & ITEM_DELETED)) {
         /* it's flagged as delete-locked.  let's see if that condition
@@ -426,11 +429,11 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     }
     if (it != NULL && settings.oldest_live != 0 && settings.oldest_live <= current_time &&
         it->time <= settings.oldest_live) {
-        do_item_unlink(it);           /* MTSAFE - cache_lock held */
+        do_item_unlink(engine, it);           /* MTSAFE - cache_lock held */
         it = NULL;
     }
     if (it != NULL && it->exptime != 0 && it->exptime <= current_time) {
-        do_item_unlink(it);           /* MTSAFE - cache_lock held */
+        do_item_unlink(engine, it);           /* MTSAFE - cache_lock held */
         it = NULL;
     }
 
@@ -441,13 +444,10 @@ item *do_item_get_notedeleted(const char *key, const size_t nkey, bool *delete_l
     return it;
 }
 
-item *item_get(const char *key, const size_t nkey) {
-    return item_get_notedeleted(key, nkey, 0);
-}
-
 /** returns an item whether or not it's delete-locked or expired. */
-item *do_item_get_nocheck(const char *key, const size_t nkey) {
-    item *it = assoc_find(key, nkey);
+item *do_item_get_nocheck(struct slabber_engine *engine, const char *key,
+                          const size_t nkey) {
+    item *it = assoc_find(engine, key, nkey);
     if (it) {
         it->refcount++;
         DEBUG_REFCNT(it, '+');
@@ -456,7 +456,7 @@ item *do_item_get_nocheck(const char *key, const size_t nkey) {
 }
 
 /* expires items that are more recent than the oldest_live setting. */
-void do_item_flush_expired(void) {
+void do_item_flush_expired(struct slabber_engine* engine) {
     int i;
     item *iter, *next;
     if (settings.oldest_live == 0)
@@ -471,7 +471,7 @@ void do_item_flush_expired(void) {
             if (iter->time >= settings.oldest_live) {
                 next = iter->next;
                 if ((iter->it_flags & ITEM_SLABBED) == 0) {
-                    do_item_unlink(iter);
+                    do_item_unlink(engine, iter);
                 }
             } else {
                 /* We've hit the first old item. Continue to the next queue. */

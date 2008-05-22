@@ -24,6 +24,9 @@ std *
 #include <sys/uio.h>
 #include <ctype.h>
 
+#include <dlfcn.h>
+#include <link.h>
+
 /* some POSIX systems need the following definition
  * to get mlockall flags out of sys/mman.h.  */
 #ifndef _P1003_1B_VISIBLE
@@ -108,9 +111,6 @@ struct stats stats;
 struct settings settings;
 
 /** file scope variables **/
-static item **todelete = NULL;
-static int delcurr;
-static int deltotal;
 static conn *listen_conn = NULL;
 static struct event_base *main_base;
 
@@ -127,7 +127,7 @@ static int *buckets = 0; /* bucket->generation array for a managed instance */
  * unix time. Use the fact that delta can't exceed one month (and real time value can't
  * be that low).
  */
-static rel_time_t realtime(const time_t exptime) {
+rel_time_t realtime(const time_t exptime) {
     /* no. of seconds in 30 days - largest possible delta exptime */
 
     if (exptime == 0) return 0; /* 0 means never expire */
@@ -252,8 +252,8 @@ static int freecurr;
 static void conn_init(void) {
     freetotal = 200;
     freecurr = 0;
-    if ((freeconns = (conn **)malloc(sizeof(conn *) * freetotal)) == NULL) {
-        fprintf(stderr, "malloc()\n");
+    if ((freeconns = (conn **)calloc(freetotal, sizeof(conn *))) == NULL) {
+        fprintf(stderr, "Failed to allocate memory: %s\n", strerror(errno));
     }
     return;
 }
@@ -321,16 +321,11 @@ conn *conn_new(const int sfd, enum conn_states init_state,
     conn *c = conn_from_freelist();
 
     if (NULL == c) {
-        if (!(c = (conn *)malloc(sizeof(conn)))) {
-            fprintf(stderr, "malloc()\n");
+        if (!(c = (conn *)calloc(1, sizeof(conn)))) {
+            fprintf(stderr, "Failed to allocate connection structure: %s\n",
+                    strerror(errno));
             return NULL;
         }
-        c->rbuf = c->wbuf = 0;
-        c->ilist = 0;
-        c->suffixlist = 0;
-        c->iov = 0;
-        c->msglist = 0;
-        c->hdrbuf = 0;
 
         c->rsize = read_buffer_size;
         c->wsize = DATA_BUFFER_SIZE;
@@ -338,7 +333,6 @@ conn *conn_new(const int sfd, enum conn_states init_state,
         c->suffixsize = SUFFIX_LIST_INITIAL;
         c->iovsize = IOV_LIST_INITIAL;
         c->msgsize = MSG_LIST_INITIAL;
-        c->hdrsize = 0;
 
         c->rbuf = (char *)malloc((size_t)c->rsize);
         c->wbuf = (char *)malloc((size_t)c->wsize);
@@ -349,14 +343,9 @@ conn *conn_new(const int sfd, enum conn_states init_state,
 
         if (c->rbuf == 0 || c->wbuf == 0 || c->ilist == 0 || c->iov == 0 ||
                 c->msglist == 0 || c->suffixlist == 0) {
-            if (c->rbuf != 0) free(c->rbuf);
-            if (c->wbuf != 0) free(c->wbuf);
-            if (c->ilist != 0) free(c->ilist);
-            if (c->suffixlist != 0) free(c->suffixlist);
-            if (c->iov != 0) free(c->iov);
-            if (c->msglist != 0) free(c->msglist);
-            free(c);
-            fprintf(stderr, "malloc()\n");
+            conn_free(c);
+            fprintf(stderr, "Failed to allocate connection buffers: %s\n",
+                    strerror(errno));
             return NULL;
         }
 
@@ -439,13 +428,13 @@ static void conn_cleanup(conn *c) {
     assert(c != NULL);
 
     if (c->item) {
-        item_remove(c->item);
+        settings.engine->item_release(settings.engine, c->item);
         c->item = 0;
     }
 
     if (c->ileft != 0) {
         for (; c->ileft > 0; c->ileft--,c->icurr++) {
-            item_remove(*(c->icurr));
+            settings.engine->item_release(settings.engine, *(c->icurr));
         }
     }
 
@@ -841,10 +830,10 @@ static void complete_nread_ascii(conn *c) {
     if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
     } else {
-      ret = store_item(it, comm, c);
-      if (ret == 1)
+      ret = settings.engine->store(settings.engine, it, comm);
+      if (ret == 1) {
           out_string(c, "STORED");
-      else if(ret == 2)
+      } else if(ret == 2)
           out_string(c, "EXISTS");
       else if(ret == 3)
           out_string(c, "NOT_FOUND");
@@ -852,7 +841,8 @@ static void complete_nread_ascii(conn *c) {
           out_string(c, "NOT_STORED");
     }
 
-    item_remove(c->item);       /* release the c->item reference */
+    /* release the c->item reference */
+    settings.engine->item_release(settings.engine, c->item);
     c->item = 0;
 }
 
@@ -999,7 +989,6 @@ static void complete_incr_bin(conn *c) {
     item *it;
     char *key;
     size_t nkey;
-#define INCR_MAX_STORAGE_LEN 24
 
     protocol_binary_response_incr* rsp = (protocol_binary_response_incr*)c->wbuf;
     protocol_binary_request_incr* req = binary_get_request(c);
@@ -1026,46 +1015,30 @@ static void complete_incr_bin(conn *c) {
                 req->message.body.initial, req->message.body.expiration);
     }
 
-    it = item_get(key, nkey);
-    if (it && (c->binary_header.request.cas == 0 || c->binary_header.request.cas == it->cas_id)) {
-        /* Weird magic in add_delta forces me to pad here */
-        char tmpbuf[INCR_MAX_STORAGE_LEN];
-        uint64_t l = 0;
-        add_delta(it, c->cmd == PROTOCOL_BINARY_CMD_INCREMENT,
-                  req->message.body.delta, tmpbuf);
-        rsp->message.body.value = swap64(strtoull(tmpbuf, NULL, 10));
-        c->cas = it->cas_id;
+    uint64_t cas = c->binary_header.request.cas;
+    uint64_t result;
+    ENGINE_ERROR_CODE ec;
+
+    ec = settings.engine->arithmetic(settings.engine, key, nkey,
+                                     c->cmd == PROTOCOL_BINARY_CMD_INCREMENT,
+                                     req->message.body.expiration!=0xffffffff,
+                                     req->message.body.delta,
+                                     req->message.body.initial,
+                                     realtime(req->message.body.expiration),
+                                     &cas, &result);
+
+    if (ec == ENGINE_SUCCESS) {
+        rsp->message.body.value = swap64(result);
+        c->cas = cas;
         write_bin_response(c, &rsp->message.body, 0, 0,
                            sizeof(rsp->message.body.value));
-        item_remove(it);         /* release our reference */
-    } else if (!it && req->message.body.expiration != 0xffffffff) {
-        /* Save some room for the response */
-        rsp->message.body.value = swap64(req->message.body.initial);
-        it = item_alloc(key, nkey, 0, realtime(req->message.body.expiration),
-                        INCR_MAX_STORAGE_LEN);
-
-        if (it != NULL) {
-            snprintf(ITEM_data(it), INCR_MAX_STORAGE_LEN, "%llu",
-                    req->message.body.initial);
-
-            if (store_item(it, NREAD_SET, c)) {
-                c->cas = it->cas_id;
-                write_bin_response(c, &rsp->message.body, 0, 0, sizeof(rsp->message.body.value));
-            } else {
-                write_bin_error(c, PROTOCOL_BINARY_RESPONSE_NOT_STORED, 0);
-            }
-            item_remove(it);         /* release our reference */
-        } else {
-            write_bin_error(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
-        }
-    } else if (it) {
-        /* incorrect CAS */
-        item_remove(it);         /* release our reference */
+    } else if (ec == ENGINE_KEY_EEXISTS) {
         write_bin_error(c, PROTOCOL_BINARY_RESPONSE_KEY_EEXISTS, 0);
-    } else {
+    } else if (ec == ENGINE_KEY_ENOENT) {
         write_bin_error(c, PROTOCOL_BINARY_RESPONSE_KEY_ENOENT, 0);
+    } else {
+       write_bin_error(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
     }
-#undef INCR_MAX_STORAGE_LEN
 }
 
 static void complete_update_bin(conn *c) {
@@ -1083,9 +1056,10 @@ static void complete_update_bin(conn *c) {
     *(ITEM_data(it) + it->nbytes - 2) = '\r';
     *(ITEM_data(it) + it->nbytes - 1) = '\n';
 
-    switch (store_item(it, c->item_comm, c)) {
+    switch (settings.engine->store(settings.engine, it, c->item_comm)) {
         case 1:
             /* Stored */
+            c->cas = it->cas_id;
             write_bin_response(c, NULL, 0, 0, 0);
             break;
         case 2:
@@ -1105,7 +1079,8 @@ static void complete_update_bin(conn *c) {
             write_bin_error(c, eno, 0);
     }
 
-    item_remove(c->item);       /* release the c->item reference */
+    /* release the c->item reference */
+    settings.engine->item_release(settings.engine, c->item);
     c->item = 0;
 }
 
@@ -1126,7 +1101,7 @@ static void process_bin_get(conn *c) {
         fprintf(stderr, "\n");
     }
 
-    it = item_get(key, nkey);
+    it = settings.engine->get(settings.engine, key, nkey);
     if (it) {
         /* the length has two unnecessary bytes ("\r\n") */
         uint16_t keylen = 0;
@@ -1314,11 +1289,13 @@ static void process_bin_update(conn *c) {
         stats_prefix_record_set(key);
     }
 
-    it = item_alloc(key, nkey, req->message.body.flags,
-            realtime(req->message.body.expiration), vlen+2);
+    it = settings.engine->item_allocate(settings.engine, key, nkey,
+            req->message.body.flags, realtime(req->message.body.expiration),
+            vlen+2);
 
     if (it == 0) {
-        if (! item_size_ok(nkey, req->message.body.flags, vlen + 2)) {
+        if (! settings.engine->item_size_ok(settings.engine, nkey,
+                req->message.body.flags, vlen + 2)) {
             write_bin_error(c, PROTOCOL_BINARY_RESPONSE_E2BIG, vlen);
         } else {
             write_bin_error(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, vlen);
@@ -1327,6 +1304,7 @@ static void process_bin_update(conn *c) {
         c->write_and_go = conn_swallow;
         return;
     }
+
 
     it->cas_id = c->binary_header.request.cas;
 
@@ -1377,10 +1355,10 @@ static void process_bin_append_prepend(conn *c) {
         stats_prefix_record_set(key);
     }
 
-    it = item_alloc(key, nkey, 0, 0, vlen+2);
-
+    it = settings.engine->item_allocate(settings.engine, key, nkey,
+                                        0, 0, vlen + 2);
     if (it == 0) {
-        if (! item_size_ok(nkey, 0, vlen + 2)) {
+        if (! settings.engine->item_size_ok(settings.engine, nkey, 0, vlen + 2)) {
             write_bin_error(c, PROTOCOL_BINARY_RESPONSE_E2BIG, vlen);
         } else {
             write_bin_error(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, vlen);
@@ -1425,8 +1403,8 @@ static void process_bin_flush(conn *c) {
     } else {
         settings.oldest_live = current_time - 1;
     }
-    item_flush_expired();
 
+    settings.engine->flush(settings.engine, exptime);
     write_bin_response(c, NULL, 0, 0, 0);
 }
 
@@ -1456,16 +1434,18 @@ static void process_bin_delete(conn *c) {
         stats_prefix_record_delete(key);
     }
 
-    it = item_get(key, nkey);
+    it = settings.engine->get(settings.engine, key, nkey);
     if (it) {
         uint64_t cas=swap64(req->message.header.request.cas);
         if (cas == 0 || cas == it->cas_id) {
             if (exptime == 0) {
-                item_unlink(it);
-                item_remove(it);      /* release our reference */
+                settings.engine->item_free(settings.engine, it);
+                /* release our reference */
+                settings.engine->item_release(settings.engine, it);
                 write_bin_response(c, NULL, 0, 0, 0);
             } else {
-                if (defer_delete(it, exptime) != -1) {
+                if (settings.engine->item_defer_delete(settings.engine,
+                                                       it, realtime(exptime)) == ENGINE_SUCCESS) {
                     write_bin_response(c, NULL, 0, 0, 0);
                 } else {
                     write_bin_error(c, PROTOCOL_BINARY_RESPONSE_ENOMEM, 0);
@@ -1533,123 +1513,6 @@ static void complete_nread(conn *c) {
     } else if (c->protocol == binary_prot) {
         complete_nread_binary(c);
     }
-}
-
-/*
- * Stores an item in the cache according to the semantics of one of the set
- * commands. In threaded mode, this is protected by the cache lock.
- *
- * Returns true if the item was stored.
- */
-int do_store_item(item *it, int comm, conn *c) {
-    char *key = ITEM_key(it);
-    bool delete_locked = false;
-    item *old_it = do_item_get_notedeleted(key, it->nkey, &delete_locked);
-    int stored = 0;
-
-    item *new_it = NULL;
-    int flags;
-
-    if (old_it != NULL && comm == NREAD_ADD) {
-        /* add only adds a nonexistent item, but promote to head of LRU */
-        do_item_update(old_it);
-    } else if (!old_it && (comm == NREAD_REPLACE
-        || comm == NREAD_APPEND || comm == NREAD_PREPEND))
-    {
-        /* replace only replaces an existing value; don't store */
-    } else if (delete_locked && (comm == NREAD_REPLACE || comm == NREAD_ADD
-        || comm == NREAD_APPEND || comm == NREAD_PREPEND))
-    {
-        /* replace and add can't override delete locks; don't store */
-    } else if (comm == NREAD_CAS) {
-        /* validate cas operation */
-        if (delete_locked)
-            old_it = do_item_get_nocheck(key, it->nkey);
-
-        if(old_it == NULL) {
-          // LRU expired
-          stored = 3;
-        }
-        else if(it->cas_id == old_it->cas_id) {
-          // cas validates
-          item_replace(old_it, it);
-          stored = 1;
-        } else {
-          if(settings.verbose > 1) {
-            fprintf(stderr, "CAS:  failure: expected %llu, got %llu\n",
-                old_it->cas_id, it->cas_id);
-          }
-          stored = 2;
-        }
-    } else {
-        /*
-         * Append - combine new and old record into single one. Here it's
-         * atomic and thread-safe.
-         */
-        if (comm == NREAD_APPEND || comm == NREAD_PREPEND) {
-            /*
-             * Validate CAS
-             */
-            if (it->cas_id != 0) {
-                // CAS much be equal
-                if (it->cas_id != old_it->cas_id) {
-                    stored = 2;
-                }
-            }
-
-            if (stored == 0) {
-                /* we have it and old_it here - alloc memory to hold both */
-                /* flags was already lost - so recover them from ITEM_suffix(it) */
-
-                flags = (int) strtol(ITEM_suffix(old_it), (char **) NULL, 10);
-
-                new_it = do_item_alloc(key, it->nkey, flags, old_it->exptime, it->nbytes + old_it->nbytes - 2 /* CRLF */);
-
-                if (new_it == NULL) {
-                    /* SERVER_ERROR out of memory */
-                    return 0;
-                }
-
-                /* copy data from it and old_it to new_it */
-
-                if (comm == NREAD_APPEND) {
-                    memcpy(ITEM_data(new_it), ITEM_data(old_it), old_it->nbytes);
-                    memcpy(ITEM_data(new_it) + old_it->nbytes - 2 /* CRLF */, ITEM_data(it), it->nbytes);
-                } else {
-                    /* NREAD_PREPEND */
-                    memcpy(ITEM_data(new_it), ITEM_data(it), it->nbytes);
-                    memcpy(ITEM_data(new_it) + it->nbytes - 2 /* CRLF */, ITEM_data(old_it), old_it->nbytes);
-                }
-
-                it = new_it;
-            }
-        }
-
-        if (stored == 0) {
-            /* "set" commands can override the delete lock
-               window... in which case we have to find the old hidden item
-               that's in the namespace/LRU but wasn't returned by
-               item_get.... because we need to replace it */
-            if (delete_locked)
-                old_it = do_item_get_nocheck(key, it->nkey);
-
-            if (old_it != NULL)
-                item_replace(old_it, it);
-            else
-                do_item_link(it);
-
-            c->cas = it->cas_id;
-
-            stored = 1;
-        }
-    }
-
-    if (old_it != NULL)
-        do_item_remove(old_it);         /* release our reference */
-    if (new_it != NULL)
-        do_item_remove(new_it);
-
-    return stored;
 }
 
 typedef struct token_s {
@@ -1894,43 +1757,6 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
     }
 #endif
 
-    if (strcmp(subcommand, "cachedump") == 0) {
-
-        char *buf;
-        unsigned int bytes, id, limit = 0;
-
-        if(ntokens < 5) {
-            out_string(c, "CLIENT_ERROR bad command line");
-            return;
-        }
-
-        id = strtoul(tokens[2].value, NULL, 10);
-        limit = strtoul(tokens[3].value, NULL, 10);
-
-        if(errno == ERANGE) {
-            out_string(c, "CLIENT_ERROR bad command line format");
-            return;
-        }
-
-        buf = item_cachedump(id, limit, &bytes);
-        write_and_free(c, buf, bytes);
-        return;
-    }
-
-    if (strcmp(subcommand, "slabs") == 0) {
-        int bytes = 0;
-        char *buf = slabs_stats(&bytes);
-        write_and_free(c, buf, bytes);
-        return;
-    }
-
-    if (strcmp(subcommand, "items") == 0) {
-        int bytes = 0;
-        char *buf = item_stats(&bytes);
-        write_and_free(c, buf, bytes);
-        return;
-    }
-
     if (strcmp(subcommand, "detail") == 0) {
         if (ntokens < 4)
             process_stats_detail(c, "");  /* outputs the error message */
@@ -1939,10 +1765,9 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         return;
     }
 
-    if (strcmp(subcommand, "sizes") == 0) {
-        int bytes = 0;
-        char *buf = item_stats_sizes(&bytes);
-        write_and_free(c, buf, bytes);
+    char *estat = settings.engine->get_stats(settings.engine, subcommand);
+    if (estat != NULL) {
+        write_and_free(c, estat, strlen(estat));
         return;
     }
 
@@ -1992,7 +1817,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
             }
 
             stats_get_cmds++;
-            it = item_get(key, nkey);
+            it = settings.engine->get(settings.engine, key, nkey);
             if (settings.detail_enabled) {
                 stats_prefix_record_get(key, NULL != it);
             }
@@ -2062,7 +1887,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
 
                 /* item_get() has incremented it->refcount for us */
                 stats_get_hits++;
-                item_update(it);
+                settings.engine->update_lru_time(settings.engine, it, current_time);
                 *(c->ilist + i) = it;
                 i++;
 
@@ -2169,13 +1994,17 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         }
     }
 
-    it = item_alloc(key, nkey, flags, realtime(exptime), vlen+2);
+    it = settings.engine->item_allocate(settings.engine, key, nkey,
+                                        flags, realtime(exptime),
+                                        vlen + 2);
 
     if (it == 0) {
-        if (! item_size_ok(nkey, flags, vlen + 2))
+        if (! settings.engine->item_size_ok(settings.engine, nkey,
+                                            flags, vlen + 2)) {
             out_string(c, "SERVER_ERROR object too large for cache");
-        else
+        } else {
             out_string(c, "SERVER_ERROR out of memory storing object");
+        }
         /* swallow the data line */
         c->write_and_go = conn_swallow;
         c->sbytes = vlen + 2;
@@ -2191,7 +2020,6 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
 }
 
 static void process_arithmetic_command(conn *c, token_t *tokens, const size_t ntokens, const bool incr) {
-    char temp[sizeof("18446744073709551615")];
     item *it;
     int64_t delta;
     char *key;
@@ -2229,66 +2057,20 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
         return;
     }
 
-    it = item_get(key, nkey);
-    if (!it) {
-        out_string(c, "NOT_FOUND");
-        return;
+    uint64_t cas = 0;
+    uint64_t result;
+    ENGINE_ERROR_CODE ec;
+
+    ec = settings.engine->arithmetic(settings.engine, key, nkey, incr, 0,
+                                     delta, 0, 0, &cas, &result);
+
+    if (ec == ENGINE_SUCCESS) {
+        char temp[sizeof("18446744073709551615")];
+        sprintf(temp, "%llu", result);
+        out_string(c, temp);
+    } else {
+       out_string(c, "NOT_FOUND");
     }
-
-    out_string(c, add_delta(it, incr, delta, temp));
-    item_remove(it);         /* release our reference */
-}
-
-/*
- * adds a delta value to a numeric item.
- *
- * it    item to adjust
- * incr  true to increment value, false to decrement
- * delta amount to adjust value by
- * buf   buffer for response string
- *
- * returns a response string to send back to the client.
- */
-char *do_add_delta(item *it, const bool incr, const int64_t delta, char *buf) {
-    char *ptr;
-    int64_t value;
-    int res;
-
-    ptr = ITEM_data(it);
-    while ((*ptr != '\0') && (*ptr < '0' && *ptr > '9')) ptr++;    // BUG: can't be true
-
-    value = strtoull(ptr, NULL, 10);
-
-    if(errno == ERANGE) {
-        return "CLIENT_ERROR cannot increment or decrement non-numeric value";
-    }
-
-    if (incr)
-        value += delta;
-    else {
-        value -= delta;
-    }
-    if(value < 0) {
-        value = 0;
-    }
-    sprintf(buf, "%llu", value);
-    res = strlen(buf);
-    if (res + 2 > it->nbytes) { /* need to realloc */
-        item *new_it;
-        new_it = do_item_alloc(ITEM_key(it), it->nkey, atoi(ITEM_suffix(it) + 1), it->exptime, res + 2 );
-        if (new_it == 0) {
-            return "SERVER_ERROR out of memory in incr/decr";
-        }
-        memcpy(ITEM_data(new_it), buf, res);
-        memcpy(ITEM_data(new_it) + res, "\r\n", 3);
-        item_replace(it, new_it);
-        do_item_remove(new_it);       /* release our reference */
-    } else { /* replace in-place */
-        memcpy(ITEM_data(it), buf, res);
-        memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
-    }
-
-    return buf;
 }
 
 static void process_delete_command(conn *c, token_t *tokens, const size_t ntokens) {
@@ -2335,53 +2117,25 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
         stats_prefix_record_delete(key);
     }
 
-    it = item_get(key, nkey);
+    it = settings.engine->get(settings.engine, key, nkey);
     if (it) {
         if (exptime == 0) {
-            item_unlink(it);
-            item_remove(it);      /* release our reference */
+            settings.engine->item_free(settings.engine, it);
+            /* release our reference */
+            settings.engine->item_release(settings.engine, it);
             out_string(c, "DELETED");
         } else {
             /* our reference will be transfered to the delete queue */
-            if (defer_delete(it, exptime) == -1) {
-                out_string(c, "SERVER_ERROR out of memory expanding delete queue");
-            } else {
+            if (settings.engine->item_defer_delete(settings.engine, it,
+                                                   realtime(exptime)) == ENGINE_SUCCESS) {
                 out_string(c, "DELETED");
+            } else {
+                out_string(c, "SERVER_ERROR out of memory expanding delete queue");
             }
         }
     } else {
         out_string(c, "NOT_FOUND");
     }
-}
-
-/*
- * Adds an item to the deferred-delete list so it can be reaped later.
- *
- * Returns the result to send to the client.
- */
-int do_defer_delete(item *it, time_t exptime)
-{
-    if (delcurr >= deltotal) {
-        item **new_delete = realloc(todelete, sizeof(item *) * deltotal * 2);
-        if (new_delete) {
-            todelete = new_delete;
-            deltotal *= 2;
-        } else {
-            /*
-             * can't delete it immediately, user wants a delay,
-             * but we ran out of memory for the delete queue
-             */
-            item_remove(it);    /* release reference */
-            return -1;
-        }
-    }
-
-    /* use its expiration time as its deletion time now */
-    it->exptime = realtime(exptime);
-    it->it_flags |= ITEM_DELETED;
-    todelete[delcurr++] = it;
-
-    return 0;
 }
 
 static void process_verbosity_command(conn *c, token_t *tokens, const size_t ntokens) {
@@ -2412,7 +2166,6 @@ static void process_command(conn *c, char *command) {
      * for commands set/add/replace, we build an item and read the data
      * directly into it, then continue in nread_complete().
      */
-
     c->msgcurr = 0;
     c->msgused = 0;
     c->iovused = 0;
@@ -2530,7 +2283,7 @@ static void process_command(conn *c, char *command) {
 
         if(ntokens == (c->noreply ? 3 : 2)) {
             settings.oldest_live = current_time - 1;
-            item_flush_expired();
+            settings.engine->flush(settings.engine, 0);
             out_string(c, "OK");
             return;
         }
@@ -2551,7 +2304,8 @@ static void process_command(conn *c, char *command) {
             settings.oldest_live = realtime(exptime) - 1;
         else /* exptime == 0 */
             settings.oldest_live = current_time - 1;
-        item_flush_expired();
+
+        settings.engine->flush(settings.engine, exptime);
         out_string(c, "OK");
         return;
 
@@ -2692,7 +2446,6 @@ static int try_read_command(conn *c) {
         *el = '\0';
 
         assert(cont <= (c->rcurr + c->rbytes));
-
         process_command(c, c->rcurr);
 
         c->rbytes -= (cont - c->rcurr);
@@ -2993,7 +2746,6 @@ static void drive_machine(conn *c) {
 
         case conn_new_cmd:
             reset_cmd_handler(c);
-            assoc_move_next_bucket();
             break;
 
         case conn_nread:
@@ -3116,7 +2868,7 @@ static void drive_machine(conn *c) {
                     while (c->ileft > 0) {
                         item *it = *(c->icurr);
                         assert((it->it_flags & ITEM_SLABBED) == 0);
-                        item_remove(it);
+                        settings.engine->item_release(settings.engine, it);
                         c->icurr++;
                         c->ileft--;
                     }
@@ -3461,45 +3213,6 @@ static void clock_handler(const int fd, const short which, void *arg) {
     set_current_time();
 }
 
-static struct event deleteevent;
-
-static void delete_handler(const int fd, const short which, void *arg) {
-    struct timeval t = {.tv_sec = 5, .tv_usec = 0};
-    static bool initialized = false;
-
-    if (initialized) {
-        /* some versions of libevent don't like deleting events that don't exist,
-           so only delete once we know this event has been added. */
-        evtimer_del(&deleteevent);
-    } else {
-        initialized = true;
-    }
-
-    evtimer_set(&deleteevent, delete_handler, 0);
-    event_base_set(main_base, &deleteevent);
-    evtimer_add(&deleteevent, &t);
-    run_deferred_deletes();
-}
-
-/* Call run_deferred_deletes instead of this. */
-void do_run_deferred_deletes(void)
-{
-    int i, j = 0;
-
-    for (i = 0; i < delcurr; i++) {
-        item *it = todelete[i];
-        if (item_delete_lock_over(it)) {
-            assert(it->refcount > 0);
-            it->it_flags &= ~ITEM_DELETED;
-            do_item_unlink(it);
-            do_item_remove(it);
-        } else {
-            todelete[j++] = it;
-        }
-    }
-    delcurr = j;
-}
-
 static void usage(void) {
     printf(PACKAGE " " VERSION "\n");
     printf("-p <num>      TCP port number to listen on (default: 11211)\n"
@@ -3686,6 +3399,40 @@ int enable_large_pages(void) {
 }
 #endif
 
+static ENGINE_HANDLE *load_engine(const char *soname, const char *config_str) {
+    ENGINE_HANDLE *ret = NULL;
+
+    void *handle = dlopen(soname, RTLD_LAZY);
+    if (handle == NULL) {
+        fprintf(stderr, "Failed to open library \"%s\": %s\n", soname,
+                strerror(errno));
+        return NULL;
+    }
+
+    CREATE_INSTANCE create_instance = (CREATE_INSTANCE)dlsym(handle, "create_instance");
+    if (create_instance == NULL) {
+        fprintf(stderr, "Library does not export \"create_instance\"\n");
+        return NULL;
+    }
+
+    ENGINE_ERROR_CODE error;
+    /* request a instance with protocol version 1 */
+    ret = (*create_instance)(1, &error);
+    if (ret == NULL) {
+        fprintf(stderr, "Failed to create instance. Error code: %d\n", error);
+        dlclose(handle);
+    }
+
+    if (ret->initialize(ret, config_str) != ENGINE_SUCCESS) {
+        ret->destroy(ret);
+        fprintf(stderr, "Failed to create instance. Error code: %d\n", error);
+        dlclose(handle);
+        ret = NULL;
+    }
+
+    return ret;
+}
+
 int main (int argc, char **argv) {
     int c;
     bool lock_memory = false;
@@ -3704,6 +3451,8 @@ int main (int argc, char **argv) {
     /* udp socket */
     static int *u_socket = NULL;
     static int u_socket_count = 0;
+
+    const char *engine = NULL;
 
     /* handle SIGINT */
     signal(SIGINT, sig_handler);
@@ -3901,14 +3650,17 @@ int main (int argc, char **argv) {
     /* initialize main thread libevent instance */
     main_base = event_init();
 
+    /* Load the storage engine */
+    if ((settings.engine = load_engine(engine, NULL)) == NULL) {
+        /* Error already reported */
+        exit(EXIT_FAILURE);
+    }
+
     /* initialize other stuff */
-    item_init();
     stats_init();
-    assoc_init();
     conn_init();
     /* Hacky suffix buffers. */
     suffix_init();
-    slabs_init(settings.maxbytes, settings.factor, preallocate);
 
     /* managed instance? alloc and zero a bucket array */
     if (settings.managed) {
@@ -3939,14 +3691,6 @@ int main (int argc, char **argv) {
         save_pid(getpid(), pid_file);
     /* initialise clock event */
     clock_handler(0, 0, 0);
-    /* initialise deletion array and timer event */
-    deltotal = 200;
-    delcurr = 0;
-    if ((todelete = malloc(sizeof(item *) * deltotal)) == NULL) {
-        perror("failed to allocate memory for deletion array");
-        exit(EXIT_FAILURE);
-    }
-    delete_handler(0, 0, 0); /* sets up the event */
 
     /* create unix mode sockets after dropping privileges */
     if (settings.socketpath != NULL) {
