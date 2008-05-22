@@ -3404,8 +3404,9 @@ static ENGINE_HANDLE *load_engine(const char *soname, const char *config_str) {
 
     void *handle = dlopen(soname, RTLD_LAZY);
     if (handle == NULL) {
+        const char *msg = dlerror();
         fprintf(stderr, "Failed to open library \"%s\": %s\n", soname,
-                strerror(errno));
+                (msg) ? msg : "unknown error");
         return NULL;
     }
 
