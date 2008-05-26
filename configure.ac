@@ -194,6 +194,11 @@ else
   AC_MSG_ERROR([Can't enable threads without the POSIX thread library.])
 fi
 
+dnl Enforce the -rdynamic option when compiling with GCC
+if test "$GCC" = "yes"; then
+  CFLAGS="-rdynamic $CFLAGS"
+fi
+
 AC_CHECK_FUNCS(mlockall)
 AC_CHECK_FUNCS(getpagesizes)
 AC_CHECK_FUNCS(memcntl)
