@@ -3234,6 +3234,8 @@ static void usage(void) {
            "              from the OS, memcached will allocate the total item-cache\n"
            "              in one large chunk.\n"
 #endif
+           "-E <engine>   Use the storage engine implemented in <engine>\n"
+           "-e <config>   Send <config> as configuration to the storage engine\n"
            );
 
     printf("-t <num>      number of threads to use, default 4\n");
@@ -3387,7 +3389,7 @@ int enable_large_pages(void) {
 static ENGINE_HANDLE *load_engine(const char *soname, const char *config_str) {
     ENGINE_HANDLE *ret = NULL;
 
-    void *handle = dlopen(soname, RTLD_LAZY);
+    void *handle = dlopen(engine, RTLD_LAZY);
     if (handle == NULL) {
         const char *msg = dlerror();
         fprintf(stderr, "Failed to open library \"%s\": %s\n", soname,
@@ -3439,7 +3441,8 @@ int main (int argc, char **argv) {
     static int u_socket_count = 0;
 
     const char *engine = NULL;
-
+    const char *engine_config = NULL;
+    
     /* handle SIGINT */
     signal(SIGINT, sig_handler);
 
@@ -3450,7 +3453,8 @@ int main (int argc, char **argv) {
     setbuf(stderr, NULL);
 
     /* process arguments */
-    while ((c = getopt(argc, argv, "a:bp:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:L")) != -1) {
+    while ((c = getopt(argc, argv,
+                       "a:bp:s:U:m:Mc:khirvdl:u:P:f:s:n:t:D:LE:e:")) != -1) {
         switch (c) {
         case 'a':
             /* access for unix domain socket, as octal mask (like chmod)*/
@@ -3541,6 +3545,13 @@ int main (int argc, char **argv) {
             }
 #endif
             break;
+        case 'E' :
+            engine = optarg;
+            break;
+        case 'e' :
+            engine_config = optarg;
+            break;
+            
         default:
             fprintf(stderr, "Illegal argument \"%c\"\n", c);
             return 1;
@@ -3637,7 +3648,7 @@ int main (int argc, char **argv) {
     main_base = event_init();
 
     /* Load the storage engine */
-    if ((settings.engine = load_engine(engine, NULL)) == NULL) {
+    if ((settings.engine = load_engine(engine, engine_config)) == NULL) {
         /* Error already reported */
         exit(EXIT_FAILURE);
     }
