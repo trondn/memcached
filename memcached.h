@@ -13,6 +13,7 @@
 #include <netdb.h>
 
 #include "protocol_binary.h"
+#include "engine.h"
 
 #define DATA_BUFFER_SIZE 2048
 #define UDP_READ_BUFFER_SIZE 65536
@@ -62,9 +63,6 @@
 #if HAVE_UNISTD_H
 # include <unistd.h>
 #endif
-
-/** Time relative to server start. Smaller than time_t on 64-bit systems. */
-typedef unsigned int rel_time_t;
 
 struct stats {
     unsigned int  curr_items;
@@ -116,24 +114,6 @@ extern struct settings settings;
 /* temp */
 #define ITEM_SLABBED 4
 
-typedef struct _stritem {
-    struct _stritem *next;
-    struct _stritem *prev;
-    struct _stritem *h_next;    /* hash chain next */
-    rel_time_t      time;       /* least recent access */
-    rel_time_t      exptime;    /* expire time */
-    int             nbytes;     /* size of data */
-    unsigned short  refcount;
-    uint8_t         nsuffix;    /* length of flags-and-length string */
-    uint8_t         it_flags;   /* ITEM_* above */
-    uint8_t         slabs_clsid;/* which slab class we're in */
-    uint8_t         nkey;       /* key length, w/terminating null and padding */
-    uint64_t        cas_id;     /* the CAS identifier */
-    void * end[];
-    /* then null-terminated key */
-    /* then " flags length\r\n" (no terminating null) */
-    /* then data with terminating \r\n (no terminating null; it's binary!) */
-} item;
 
 #define ITEM_key(item) ((char*)&((item)->end[0]))
 
@@ -178,9 +158,6 @@ enum protocol {
 };
 
 #define IS_UDP(x) (x == ascii_udp_prot)
-
-enum operation { NREAD_ADD = 1, NREAD_SET, NREAD_REPLACE, NREAD_APPEND, NREAD_PREPEND, NREAD_CAS };
-
 
 typedef struct conn conn;
 struct conn {
@@ -285,7 +262,6 @@ conn *conn_new(const int sfd, const enum conn_states init_state, const int event
 
 
 #include "stats.h"
-#include "engine.h"
 
 rel_time_t realtime(const time_t exptime);
 
