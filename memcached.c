@@ -3389,7 +3389,7 @@ int enable_large_pages(void) {
 static ENGINE_HANDLE *load_engine(const char *soname, const char *config_str) {
     ENGINE_HANDLE *ret = NULL;
 
-    void *handle = dlopen(engine, RTLD_LAZY);
+    void *handle = dlopen(soname, RTLD_LAZY);
     if (handle == NULL) {
         const char *msg = dlerror();
         fprintf(stderr, "Failed to open library \"%s\": %s\n", soname,
