@@ -1,4 +1,5 @@
 bin_PROGRAMS = memcached memcached-debug
+include_HEADERS = engine.h
 
 memcached_SOURCES = memcached.c memcached.h \
                     thread.c \
