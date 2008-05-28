@@ -177,19 +177,6 @@ extern "C" {
                    const int nkey);
 
       /**
-       * Get an object from the storage.
-       *
-       * @param handle Pointer to the instance
-       * @param key Pointer to the key
-       * @param nkey Number of bytes in the key
-       * @param delete_locked Is this set to returned as true if the item is
-       *                      locked by a delete
-       * @return Pointer to the object if found, null otherwise
-       */
-      item* (*get_not_deleted)(struct engine_handle* handle, const void* key,
-                               const int nkey, bool* delete_locked);
-
-      /**
        * Get statistics from the engine
        *
        * @param handle Pointer to the instance
@@ -247,14 +234,14 @@ extern "C" {
       void (*flush)(struct engine_handle* handle, time_t when);
 
       /**
-       * Set the LRU time for an item
+       * Set the time for an item
        *
        * @param handle Pointer to the instance
        * @param item The item to set the LRU item on
        * @param newtime The new time for the object
        */
-      void (*update_lru_time)(struct engine_handle* handle, item *item,
-                              const rel_time_t newtime);
+      void (*touch)(struct engine_handle* handle, item *item, 
+                    const rel_time_t newtime);
    } ENGINE_HANDLE;
 
    /**

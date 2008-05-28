@@ -1881,7 +1881,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
 
                 /* item_get() has incremented it->refcount for us */
                 stats_get_hits++;
-                settings.engine->update_lru_time(settings.engine, it, current_time);
+                settings.engine->touch(settings.engine, it, current_time);
                 *(c->ilist + i) = it;
                 i++;
 

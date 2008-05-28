@@ -54,9 +54,8 @@ static item* slabber_item_allocate(struct engine_handle* handle, const void* key
         const int nbytes);
 static void slabber_item_release(struct engine_handle* handle, item* item);
 static item* slabber_get(struct engine_handle* handle, const void* key, const int nkey);
-static item* slabber_get_not_deleted(struct engine_handle* handle, const void* key, const int nkey, bool* delete_locked);
 static char* slabber_get_stats(struct engine_handle* handle, const char* what_to_fetch);
-static void slabber_update_lru_time(struct engine_handle* handle, item *item, const rel_time_t newtime);
+static void slabber_touch(struct engine_handle* handle, item *item, const rel_time_t newtime);
 static ENGINE_ERROR_CODE slabber_store(struct engine_handle* handle, item* item, enum operation operation);
 static void slabber_flush(struct engine_handle* handle, time_t when);
 static ENGINE_ERROR_CODE slabber_item_delete(struct engine_handle* handle, item* item, const rel_time_t exptime);
@@ -100,12 +99,11 @@ ENGINE_HANDLE* create_instance(int version, ENGINE_ERROR_CODE* error) {
    handle->engine.item_delete = slabber_item_delete;
    handle->engine.item_release = slabber_item_release;
    handle->engine.get = slabber_get;
-   handle->engine.get_not_deleted = slabber_get_not_deleted;
    handle->engine.get_stats = slabber_get_stats;
    handle->engine.store = slabber_store;
    handle->engine.arithmetic = slabber_arithmetic;
    handle->engine.flush = slabber_flush;
-   handle->engine.update_lru_time = slabber_update_lru_time;
+   handle->engine.touch = slabber_touch;
 
    return &handle->engine;
 }
@@ -248,7 +246,7 @@ static void slabber_item_release(struct engine_handle* handle, item* item) {
 /*
  * Moves an item to the back of the LRU queue.
  */
-static void slabber_update_lru_time(struct engine_handle* handle,
+static void slabber_touch(struct engine_handle* handle,
                                     item *item, const rel_time_t newtime) {
     struct slabber_engine* engine = get_handle(handle);
     pthread_mutex_lock(&engine->cache_lock);
@@ -443,26 +441,14 @@ static void slabber_flush(struct engine_handle* handle, time_t when) {
    pthread_mutex_unlock(&engine->cache_lock);
 }
 
-/*
- * Returns an item if it hasn't been marked as expired or deleted,
- * lazy-expiring as needed.
- */
-static item* slabber_get_not_deleted(struct engine_handle* handle,
-                                     const void* key, const int nkey,
-                                     bool* delete_locked)
-{
+static item* slabber_get(struct engine_handle* handle, const void* key,
+                         const int nkey) {
    struct slabber_engine* engine = get_handle(handle);
    item *it;
    pthread_mutex_lock(&engine->cache_lock);
-   it = do_item_get_notedeleted(engine, key, nkey, delete_locked);
+   it = do_item_get_notedeleted(engine, key, nkey, 0);
    pthread_mutex_unlock(&engine->cache_lock);
    return it;
-}
-
-
-static item* slabber_get(struct engine_handle* handle, const void* key,
-                         const int nkey) {
-   return slabber_get_not_deleted(handle, key, nkey, 0);
 }
 
 /*
