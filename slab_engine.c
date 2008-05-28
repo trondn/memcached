@@ -312,10 +312,13 @@ static int do_store_item(struct slabber_engine* engine, item *it, enum operation
    char *key = ITEM_key(it);
    bool delete_locked = false;
    item *old_it = do_item_get_notedeleted(engine, key, it->nkey, &delete_locked);
-   int stored = 0;
 
    item *new_it = NULL;
    int flags;
+
+   /* initial value is "NOT_STORED" because we want to keep the same semantic 
+      as the original do_store_item implementation. */
+   ENGINE_ERROR_CODE stored = ENGINE_NOT_STORED;
 
    if (old_it != NULL && comm == NREAD_ADD) {
       /* add only adds a nonexistent item, but promote to head of LRU */
@@ -334,17 +337,17 @@ static int do_store_item(struct slabber_engine* engine, item *it, enum operation
 
       if(old_it == NULL) {
          // LRU expired
-         stored = 3;
+         stored = ENGINE_KEY_ENOENT;
       } else if(it->cas_id == old_it->cas_id) {
          // cas validates
          do_item_replace(engine, old_it, it);
-         stored = 1;
+         stored = ENGINE_SUCCESS;
       } else {
          if(settings.verbose > 1) {
             fprintf(stderr, "CAS:  failure: expected %llu, got %llu\n",
                     old_it->cas_id, it->cas_id);
          }
-         stored = 2;
+         stored = ENGINE_KEY_EEXISTS;
       }
    } else {
       /*
@@ -358,11 +361,11 @@ static int do_store_item(struct slabber_engine* engine, item *it, enum operation
          if (it->cas_id != 0) {
             // CAS much be equal
             if (it->cas_id != old_it->cas_id) {
-               stored = 2;
+               stored = ENGINE_KEY_EEXISTS;
             }
          }
 
-         if (stored == 0) {
+         if (stored == ENGINE_NOT_STORED) {
             /* we have it and old_it here - alloc memory to hold both */
             /* flags was already lost - so recover them from ITEM_suffix(it) */
 
@@ -391,7 +394,7 @@ static int do_store_item(struct slabber_engine* engine, item *it, enum operation
          }
       }
 
-      if (stored == 0) {
+      if (stored == ENGINE_NOT_STORED) {
          /* "set" commands can override the delete lock
             window... in which case we have to find the old hidden item
             that's in the namespace/LRU but wasn't returned by
@@ -404,7 +407,7 @@ static int do_store_item(struct slabber_engine* engine, item *it, enum operation
          else
             do_item_link(engine, it);
 
-         stored = 1;
+         stored = ENGINE_SUCCESS;
       }
    }
 

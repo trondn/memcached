@@ -831,11 +831,12 @@ static void complete_nread_ascii(conn *c) {
         out_string(c, "CLIENT_ERROR bad data chunk");
     } else {
       ret = settings.engine->store(settings.engine, it, comm);
-      if (ret == 1) {
+
+      if (ret == ENGINE_SUCCESS) {
           out_string(c, "STORED");
-      } else if(ret == 2)
+      } else if(ret == ENGINE_KEY_EEXISTS)
           out_string(c, "EXISTS");
-      else if(ret == 3)
+      else if(ret == ENGINE_KEY_ENOENT)
           out_string(c, "NOT_FOUND");
       else
           out_string(c, "NOT_STORED");
