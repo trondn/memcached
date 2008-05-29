@@ -3342,8 +3342,10 @@ static void remove_pidfile(const char *pid_file) {
 }
 
 static void sig_handler(const int sig) {
-    printf("SIGINT handled.\n");
-    exit(EXIT_SUCCESS);
+    if(!finish_all_workers(settings.num_threads)) {
+        printf("SIGINT handled. Unclean shutdown.\n");
+        exit(EXIT_SUCCESS);
+    }
 }
 
 #if defined(HAVE_GETPAGESIZES) && defined(HAVE_MEMCNTL)
@@ -3734,6 +3736,9 @@ int main (int argc, char **argv) {
       free(l_socket);
     if (u_socket)
       free(u_socket);
+
+    /* Destroy the engine handler */
+    settings.engine->destroy(settings.engine);
 
     return 0;
 }
