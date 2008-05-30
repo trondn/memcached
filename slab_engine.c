@@ -306,7 +306,8 @@ static ENGINE_ERROR_CODE slabber_item_delete(struct engine_handle* handle,
  *
  * Returns True if the item was stored
  */
-static int do_store_item(struct slabber_engine* engine, item *it, enum operation comm) {
+static ENGINE_ERROR_CODE do_store_item(struct slabber_engine* engine,
+                                       item *it, enum operation comm) {
    char *key = ITEM_key(it);
    bool delete_locked = false;
    item *old_it = do_item_get_notedeleted(engine, key, it->nkey, &delete_locked);

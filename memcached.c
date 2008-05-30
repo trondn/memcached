@@ -1058,15 +1058,15 @@ static void complete_update_bin(conn *c) {
     *(ITEM_data(it) + it->nbytes - 1) = '\n';
 
     switch (settings.engine->store(settings.engine, it, c->item_comm)) {
-        case 1:
+        case ENGINE_SUCCESS:
             /* Stored */
             c->cas = it->cas_id;
             write_bin_response(c, NULL, 0, 0, 0);
             break;
-        case 2:
+        case ENGINE_KEY_EEXISTS:
             write_bin_error(c, PROTOCOL_BINARY_RESPONSE_KEY_EEXISTS, 0);
             break;
-        case 3:
+        case ENGINE_KEY_ENOENT:
             write_bin_error(c, PROTOCOL_BINARY_RESPONSE_KEY_ENOENT, 0);
             break;
         default:
