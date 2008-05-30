@@ -395,6 +395,25 @@ void STATS_UNLOCK() {
     pthread_mutex_unlock(&stats_lock);
 }
 
+bool finish_all_workers(int nthreads) {
+    int i;
+
+    /* unlikely but just in case */
+    if(!nthreads) return false; 
+
+    /* finish all threads except the main_base */ 
+    for(i = 1; i < nthreads; i++) {
+        if(event_base_loopexit(threads[i].base, 0) != 0)
+            return false; 
+    }
+
+    /* finish the main_base */
+    if(event_base_loopexit(threads[0].base, 0) != 0)
+        return false;
+
+    return true;
+}
+
 /*
  * Initializes the thread subsystem, creating various worker threads.
  *
