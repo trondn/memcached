@@ -33,9 +33,6 @@ struct conn_queue {
     pthread_cond_t  cond;
 };
 
-/* Lock for cache operations (item_*, assoc_*) */
-pthread_mutex_t cache_lock;
-
 /* Connection lock around accepting new connections */
 pthread_mutex_t conn_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -326,25 +323,18 @@ int is_listen_thread() {
 /********************************* ITEM ACCESS *******************************/
 
 /*
- * Allocates a new item.
- */
-item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes) {
-    item *it;
-    pthread_mutex_lock(&cache_lock);
-    it = do_item_alloc(key, nkey, flags, exptime, nbytes);
-    pthread_mutex_unlock(&cache_lock);
-    return it;
-}
-
-/*
  * Returns an item if it hasn't been marked as expired,
  * lazy-expiring as needed.
  */
 item *item_get(const char *key, const size_t nkey) {
     item *it;
-    pthread_mutex_lock(&cache_lock);
-    it = do_item_get(key, nkey);
-    pthread_mutex_unlock(&cache_lock);
+    uint32_t hv = hash(key, nkey, 0);
+    partition_t *p = get_partition_by_hash(hv);
+
+    pthread_mutex_lock(&p->mutex);
+    it = do_item_get(key, nkey, hv, p);
+    pthread_mutex_unlock(&p->mutex);
+
     return it;
 }
 
@@ -353,10 +343,11 @@ item *item_get(const char *key, const size_t nkey) {
  */
 int item_link(item *item) {
     int ret;
+    partition_t *p = get_partition_by_hash(item->hash);
 
-    pthread_mutex_lock(&cache_lock);
-    ret = do_item_link(item);
-    pthread_mutex_unlock(&cache_lock);
+    pthread_mutex_lock(&p->mutex);
+    ret = do_item_link(item, p);
+    pthread_mutex_unlock(&p->mutex);
     return ret;
 }
 
@@ -365,49 +356,33 @@ int item_link(item *item) {
  * needed.
  */
 void item_remove(item *item) {
-    pthread_mutex_lock(&cache_lock);
-    do_item_remove(item);
-    pthread_mutex_unlock(&cache_lock);
-}
+    partition_t *p = get_partition_by_hash(item->hash);
 
-/*
- * Replaces one item with another in the hashtable.
- * Unprotected by a mutex lock since the core server does not require
- * it to be thread-safe.
- */
-int item_replace(item *old_it, item *new_it) {
-    return do_item_replace(old_it, new_it);
+    pthread_mutex_lock(&p->mutex);
+    do_item_remove(item, p);
+    pthread_mutex_unlock(&p->mutex);
 }
 
 /*
  * Unlinks an item from the LRU and hashtable.
  */
 void item_unlink(item *item) {
-    pthread_mutex_lock(&cache_lock);
-    do_item_unlink(item);
-    pthread_mutex_unlock(&cache_lock);
+    partition_t *p = get_partition_by_hash(item->hash);
+
+    pthread_mutex_lock(&p->mutex);
+    do_item_unlink(item, p);
+    pthread_mutex_unlock(&p->mutex);
 }
 
 /*
  * Moves an item to the back of the LRU queue.
  */
 void item_update(item *item) {
-    pthread_mutex_lock(&cache_lock);
-    do_item_update(item);
-    pthread_mutex_unlock(&cache_lock);
-}
+    partition_t *p = get_partition_by_hash(item->hash);
 
-/*
- * Does arithmetic on a numeric item value.
- */
-enum delta_result_type add_delta(conn *c, item *item, int incr,
-                                 const int64_t delta, char *buf) {
-    enum delta_result_type ret;
-
-    pthread_mutex_lock(&cache_lock);
-    ret = do_add_delta(c, item, incr, delta, buf);
-    pthread_mutex_unlock(&cache_lock);
-    return ret;
+    pthread_mutex_lock(&p->mutex);
+    do_item_update(item, p);
+    pthread_mutex_unlock(&p->mutex);
 }
 
 /*
@@ -415,50 +390,12 @@ enum delta_result_type add_delta(conn *c, item *item, int incr,
  */
 enum store_item_type store_item(item *item, int comm, conn* c) {
     enum store_item_type ret;
+    partition_t *p = get_partition_by_hash(item->hash);
 
-    pthread_mutex_lock(&cache_lock);
-    ret = do_store_item(item, comm, c);
-    pthread_mutex_unlock(&cache_lock);
+    pthread_mutex_lock(&p->mutex);
+    ret = do_store_item(item, comm, c, p);
+    pthread_mutex_unlock(&p->mutex);
     return ret;
-}
-
-/*
- * Flushes expired items after a flush_all call
- */
-void item_flush_expired() {
-    pthread_mutex_lock(&cache_lock);
-    do_item_flush_expired();
-    pthread_mutex_unlock(&cache_lock);
-}
-
-/*
- * Dumps part of the cache
- */
-char *item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes) {
-    char *ret;
-
-    pthread_mutex_lock(&cache_lock);
-    ret = do_item_cachedump(slabs_clsid, limit, bytes);
-    pthread_mutex_unlock(&cache_lock);
-    return ret;
-}
-
-/*
- * Dumps statistics about slab classes
- */
-void  item_stats(ADD_STAT add_stats, void *c) {
-    pthread_mutex_lock(&cache_lock);
-    do_item_stats(add_stats, c);
-    pthread_mutex_unlock(&cache_lock);
-}
-
-/*
- * Dumps a list of objects of each size in 32-byte increments
- */
-void  item_stats_sizes(ADD_STAT add_stats, void *c) {
-    pthread_mutex_lock(&cache_lock);
-    do_item_stats_sizes(add_stats, c);
-    pthread_mutex_unlock(&cache_lock);
 }
 
 /******************************* GLOBAL STATS ******************************/
@@ -581,7 +518,6 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out) {
 void thread_init(int nthreads, struct event_base *main_base) {
     int         i;
 
-    pthread_mutex_init(&cache_lock, NULL);
     pthread_mutex_init(&stats_lock, NULL);
 
     pthread_mutex_init(&init_lock, NULL);

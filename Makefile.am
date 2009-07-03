@@ -14,6 +14,7 @@ memcached_SOURCES = memcached.c memcached.h \
                     thread.c daemon.c \
                     stats.c stats.h \
                     util.c util.h \
+                    partition.c partition.h \
                     trace.h cache.h
 
 if BUILD_CACHE

@@ -283,6 +283,7 @@ typedef struct _stritem {
     rel_time_t      time;       /* least recent access */
     rel_time_t      exptime;    /* expire time */
     int             nbytes;     /* size of data */
+    uint32_t        hash; /* object hash value */
     unsigned short  refcount;
     uint8_t         nsuffix;    /* length of flags-and-length string */
     uint8_t         it_flags;   /* ITEM_* above */
@@ -401,24 +402,24 @@ struct conn {
 /* current time of day (updated periodically) */
 extern volatile rel_time_t current_time;
 
-/*
- * Functions
- */
-void do_accept_new_conns(const bool do_accept);
-enum delta_result_type do_add_delta(conn *c, item *item, const bool incr,
-                                    const int64_t delta, char *buf);
-enum store_item_type do_store_item(item *item, int comm, conn* c);
-conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
-extern int daemonize(int nochdir, int noclose);
-
-
 #include "stats.h"
+#include "partition.h"
 #include "slabs.h"
 #include "assoc.h"
 #include "items.h"
 #include "trace.h"
 #include "hash.h"
 #include "util.h"
+
+
+/*
+ * Functions
+ */
+void do_accept_new_conns(const bool do_accept);
+enum store_item_type do_store_item(item *item, int comm, conn* c, partition_t *p);
+conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
+extern int daemonize(int nochdir, int noclose);
+
 
 /*
  * Functions such as the libevent-related calls that need to do cross-thread
@@ -432,21 +433,17 @@ int  dispatch_event_add(int thread, conn *c);
 void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size, enum network_transport transport);
 
 /* Lock wrappers for cache functions that are called from main loop. */
-enum delta_result_type add_delta(conn *c, item *item, const int incr,
+enum delta_result_type add_delta(conn *c, item *item, const bool incr,
                                  const int64_t delta, char *buf);
 void accept_new_conns(const bool do_accept);
 conn *conn_from_freelist(void);
 bool  conn_add_to_freelist(conn *c);
 int   is_listen_thread(void);
 item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
-char *item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
-void  item_flush_expired(void);
 item *item_get(const char *key, const size_t nkey);
 int   item_link(item *it);
 void  item_remove(item *it);
 int   item_replace(item *it, item *new_it);
-void  item_stats(ADD_STAT add_stats, void *c);
-void  item_stats_sizes(ADD_STAT add_stats, void *c);
 void  item_unlink(item *it);
 void  item_update(item *it);
 

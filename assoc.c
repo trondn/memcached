@@ -14,64 +14,22 @@
 #include <assert.h>
 #include <pthread.h>
 
-static pthread_cond_t maintenance_cond = PTHREAD_COND_INITIALIZER;
-
-
-typedef  unsigned long  int  ub4;   /* unsigned 4-byte quantities */
-typedef  unsigned       char ub1;   /* unsigned 1-byte quantities */
-
-/* how many powers of 2's worth of buckets we use */
-static unsigned int hashpower = 16;
-
-#define hashsize(n) ((ub4)1<<(n))
-#define hashmask(n) (hashsize(n)-1)
-
-/* Main hash table. This is where we look except during expansion. */
-static item** primary_hashtable = 0;
-
-/*
- * Previous hash table. During expansion, we look here for keys that haven't
- * been moved over to the primary yet.
- */
-static item** old_hashtable = 0;
-
-/* Number of items in the hash table. */
-static unsigned int hash_items = 0;
-
-/* Flag: Are we in the middle of expanding now? */
-static bool expanding = false;
-
-/*
- * During expansion we migrate values with bucket granularity; this is how
- * far we've gotten so far. Ranges from 0 .. hashsize(hashpower - 1) - 1.
- */
-static unsigned int expand_bucket = 0;
-
-void assoc_init(void) {
-    primary_hashtable = calloc(hashsize(hashpower), sizeof(void *));
-    if (! primary_hashtable) {
-        fprintf(stderr, "Failed to init hashtable.\n");
-        exit(EXIT_FAILURE);
-    }
-}
-
-item *assoc_find(const char *key, const size_t nkey) {
-    uint32_t hv = hash(key, nkey, 0);
+item *assoc_find(const void* key, size_t nkey, uint32_t hv, partition_t *p) {
     item *it;
     unsigned int oldbucket;
 
-    if (expanding &&
-        (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
+    if (p->expanding &&
+        (oldbucket = (hv & hashmask(p->hashpower - 1))) >= p->expand_bucket)
     {
-        it = old_hashtable[oldbucket];
+        it = p->old_hashtable[oldbucket];
     } else {
-        it = primary_hashtable[hv & hashmask(hashpower)];
+        it = p->primary_hashtable[hv & hashmask(p->hashpower)];
     }
 
     item *ret = NULL;
     int depth = 0;
     while (it) {
-        if ((nkey == it->nkey) && (memcmp(key, ITEM_key(it), nkey) == 0)) {
+        if ((hv == it->hash) && (nkey == it->nkey) && (memcmp(key, ITEM_key(it), nkey) == 0)) {
             ret = it;
             break;
         }
@@ -85,17 +43,18 @@ item *assoc_find(const char *key, const size_t nkey) {
 /* returns the address of the item pointer before the key.  if *item == 0,
    the item wasn't found */
 
-static item** _hashitem_before (const char *key, const size_t nkey) {
-    uint32_t hv = hash(key, nkey, 0);
+static item** _hashitem_before (item *it, partition_t *p) {
+    size_t nkey = it->nkey;
+    const char* key = ITEM_key(it);
     item **pos;
     unsigned int oldbucket;
 
-    if (expanding &&
-        (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
+    if (p->expanding &&
+        (oldbucket = (it->hash & hashmask(p->hashpower - 1))) >= p->expand_bucket)
     {
-        pos = &old_hashtable[oldbucket];
+        pos = &p->old_hashtable[oldbucket];
     } else {
-        pos = &primary_hashtable[hv & hashmask(hashpower)];
+        pos = &p->primary_hashtable[it->hash & hashmask(p->hashpower)];
     }
 
     while (*pos && ((nkey != (*pos)->nkey) || memcmp(key, ITEM_key(*pos), nkey))) {
@@ -104,57 +63,68 @@ static item** _hashitem_before (const char *key, const size_t nkey) {
     return pos;
 }
 
-/* grows the hashtable to the next power of 2. */
-static void assoc_expand(void) {
-    old_hashtable = primary_hashtable;
+static void *assoc_maintenance_thread(void *arg);
 
-    primary_hashtable = calloc(hashsize(hashpower + 1), sizeof(void *));
-    if (primary_hashtable) {
+/* grows the hashtable to the next power of 2. */
+static void assoc_expand(partition_t *p) {
+    p->old_hashtable = p->primary_hashtable;
+    p->primary_hashtable = calloc(hashsize(p->hashpower + 1), sizeof(void *));
+    if (p->primary_hashtable) {
         if (settings.verbose > 1)
             fprintf(stderr, "Hash table expansion starting\n");
-        hashpower++;
-        expanding = true;
-        expand_bucket = 0;
-        pthread_cond_signal(&maintenance_cond);
+        p->hashpower++;
+        p->expanding = true;
+        p->expand_bucket = 0;
+
+        /* start a thread to do the expansion */
+        int ret;
+        pthread_t tid;
+        if ((ret = pthread_create(&tid, NULL,
+                                  assoc_maintenance_thread, p)) != 0) {
+            fprintf(stderr, "Can't create thread: %s\n", strerror(ret));
+            p->hashpower--;
+            p->expanding = false;
+            free(p->primary_hashtable);
+            p->primary_hashtable = p->old_hashtable;
+        }
     } else {
-        primary_hashtable = old_hashtable;
+        p->primary_hashtable = p->old_hashtable;
         /* Bad news, but we can keep running. */
     }
 }
 
 /* Note: this isn't an assoc_update.  The key must not already exist to call this */
-int assoc_insert(item *it) {
-    uint32_t hv;
+int assoc_insert(item *it, partition_t *p) {
+    uint32_t hv = it->hash;
     unsigned int oldbucket;
 
-    assert(assoc_find(ITEM_key(it), it->nkey) == 0);  /* shouldn't have duplicately named things defined */
+    assert(assoc_find(ITEM_key(it), it->nkey, it->hash, p) == 0);  /* shouldn't have duplicately named things defined */
 
-    hv = hash(ITEM_key(it), it->nkey, 0);
-    if (expanding &&
-        (oldbucket = (hv & hashmask(hashpower - 1))) >= expand_bucket)
+    if (p->expanding &&
+        (oldbucket = (hv & hashmask(p->hashpower - 1))) >= p->expand_bucket)
     {
-        it->h_next = old_hashtable[oldbucket];
-        old_hashtable[oldbucket] = it;
+        it->h_next = p->old_hashtable[oldbucket];
+        p->old_hashtable[oldbucket] = it;
     } else {
-        it->h_next = primary_hashtable[hv & hashmask(hashpower)];
-        primary_hashtable[hv & hashmask(hashpower)] = it;
+        it->h_next = p->primary_hashtable[hv & hashmask(p->hashpower)];
+        p->primary_hashtable[hv & hashmask(p->hashpower)] = it;
     }
 
-    hash_items++;
-    if (! expanding && hash_items > (hashsize(hashpower) * 3) / 2) {
-        assoc_expand();
+    p->hash_items++;
+    if (! p->expanding && p->hash_items > (hashsize(p->hashpower) * 3) / 2) {
+        assoc_expand(p);
     }
 
     MEMCACHED_ASSOC_INSERT(ITEM_key(it), it->nkey, hash_items);
     return 1;
 }
 
-void assoc_delete(const char *key, const size_t nkey) {
-    item **before = _hashitem_before(key, nkey);
+void assoc_delete(item *it, partition_t *p) {
+    item **before = _hashitem_before(it, p);
 
     if (*before) {
         item *nxt;
-        hash_items--;
+        p->hash_items--;
         /* The DTrace probe cannot be triggered as the last instruction
          * due to possible tail-optimization by the compiler
          */
@@ -170,80 +140,44 @@ void assoc_delete(const char *key, const size_t nkey) {
 }
 
 
-static volatile int do_run_maintenance_thread = 1;
-
 #define DEFAULT_HASH_BULK_MOVE 1
 int hash_bulk_move = DEFAULT_HASH_BULK_MOVE;
 
 static void *assoc_maintenance_thread(void *arg) {
+    partition_t *p = arg;
+    bool done = false;
+    do {
+        int ii;
+        pthread_mutex_lock(&p->mutex);
 
-    while (do_run_maintenance_thread) {
-        int ii = 0;
-
-        /* Lock the cache, and bulk move multiple buckets to the new
-         * hash table. */
-        pthread_mutex_lock(&cache_lock);
-
-        for (ii = 0; ii < hash_bulk_move && expanding; ++ii) {
+        for (ii = 0; ii < hash_bulk_move && p->expanding; ++ii) {
             item *it, *next;
             int bucket;
 
-            for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
+            for (it = p->old_hashtable[p->expand_bucket];
+                 NULL != it; it = next) {
                 next = it->h_next;
 
-                bucket = hash(ITEM_key(it), it->nkey, 0) & hashmask(hashpower);
-                it->h_next = primary_hashtable[bucket];
-                primary_hashtable[bucket] = it;
+                bucket = hash(ITEM_key(it), it->nkey, 0) & hashmask(p->hashpower);
+                it->h_next = p->primary_hashtable[bucket];
+                p->primary_hashtable[bucket] = it;
             }
 
-            old_hashtable[expand_bucket] = NULL;
-
-            expand_bucket++;
-            if (expand_bucket == hashsize(hashpower - 1)) {
-                expanding = false;
-                free(old_hashtable);
+            p->old_hashtable[p->expand_bucket] = NULL;
+            p->expand_bucket++;
+            if (p->expand_bucket == hashsize(p->hashpower - 1)) {
+                p->expanding = false;
+                free(p->old_hashtable);
                 if (settings.verbose > 1)
                     fprintf(stderr, "Hash table expansion done\n");
             }
         }
-
-        if (!expanding) {
-            /* We are done expanding.. just wait for next invocation */
-            pthread_cond_wait(&maintenance_cond, &cache_lock);
+        if (!p->expanding) {
+            done = true;
         }
+        pthread_mutex_unlock(&p->mutex);
+    } while (!done);
 
-        pthread_mutex_unlock(&cache_lock);
-    }
+    pthread_detach(pthread_self());
     return NULL;
 }
-
-static pthread_t maintenance_tid;
-
-int start_assoc_maintenance_thread() {
-    int ret;
-    char *env = getenv("MEMCACHED_HASH_BULK_MOVE");
-    if (env != NULL) {
-        hash_bulk_move = atoi(env);
-        if (hash_bulk_move == 0) {
-            hash_bulk_move = DEFAULT_HASH_BULK_MOVE;
-        }
-    }
-    if ((ret = pthread_create(&maintenance_tid, NULL,
-                              assoc_maintenance_thread, NULL)) != 0) {
-        fprintf(stderr, "Can't create thread: %s\n", strerror(ret));
-        return -1;
-    }
-    return 0;
-}
-
-void stop_assoc_maintenance_thread() {
-    pthread_mutex_lock(&cache_lock);
-    do_run_maintenance_thread = 0;
-    pthread_cond_signal(&maintenance_cond);
-    pthread_mutex_unlock(&cache_lock);
-
-    /* Wait for the maintenance thread to stop */
-    pthread_join(maintenance_tid, NULL);
-}
-
-

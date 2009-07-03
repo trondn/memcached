@@ -6,6 +6,9 @@ use FindBin qw($Bin);
 use lib "$Bin/lib";
 use MemcachedTest;
 
+# We need to ensure that we steal from the same partition ;-) Force only one..
+$ENV{"PARTITION_SIZE"} = "1";
+
 my $server = new_memcached();
 my $sock = $server->sock;
 my $value = "B"x66560;

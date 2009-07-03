@@ -1,9 +1,9 @@
-/* associative array */
-void assoc_init(void);
-item *assoc_find(const char *key, const size_t nkey);
-int assoc_insert(item *item);
-void assoc_delete(const char *key, const size_t nkey);
-void do_assoc_move_next_bucket(void);
-int start_assoc_maintenance_thread(void);
-void stop_assoc_maintenance_thread(void);
+#ifndef ASSOC_H
+#define ASSOC_H
 
+/* associative array */
+item *assoc_find(const void *key, size_t nkey, uint32_t hv, partition_t *p);
+int assoc_insert(item *item, partition_t *p);
+void assoc_delete(item *item, partition_t *p);
+
+#endif

@@ -6,6 +6,9 @@ use FindBin qw($Bin);
 use lib "$Bin/lib";
 use MemcachedTest;
 
+# We need to make sure we only operate in one patrition, so let's use 1
+$ENV{"PARTITION_SIZE"} = "1";
+
 my $server = new_memcached("-m 3");
 my $sock = $server->sock;
 my $value = "B"x66560;

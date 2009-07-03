@@ -1833,9 +1833,9 @@ static void complete_nread(conn *c) {
  *
  * Returns the state of storage.
  */
-enum store_item_type do_store_item(item *it, int comm, conn *c) {
+enum store_item_type do_store_item(item *it, int comm, conn *c, partition_t *p) {
     char *key = ITEM_key(it);
-    item *old_it = do_item_get(key, it->nkey);
+    item *old_it = do_item_get(key, it->nkey, it->hash, p);
     enum store_item_type stored = NOT_STORED;
 
     item *new_it = NULL;
@@ -1843,7 +1843,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c) {
 
     if (old_it != NULL && comm == NREAD_ADD) {
         /* add only adds a nonexistent item, but promote to head of LRU */
-        do_item_update(old_it);
+        do_item_update(old_it, p);
     } else if (!old_it && (comm == NREAD_REPLACE
         || comm == NREAD_APPEND || comm == NREAD_PREPEND))
     {
@@ -1865,7 +1865,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c) {
             c->thread->stats.slab_stats[old_it->slabs_clsid].cas_hits++;
             pthread_mutex_unlock(&c->thread->stats.mutex);
 
-            item_replace(old_it, it);
+            do_item_replace(old_it, it, p);
             stored = STORED;
         } else {
             pthread_mutex_lock(&c->thread->stats.mutex);
@@ -1901,12 +1901,16 @@ enum store_item_type do_store_item(item *it, int comm, conn *c) {
 
                 flags = (int) strtol(ITEM_suffix(old_it), (char **) NULL, 10);
 
-                new_it = do_item_alloc(key, it->nkey, flags, old_it->exptime, it->nbytes + old_it->nbytes - 2 /* CRLF */);
+                pthread_mutex_unlock(&p->mutex);
+                new_it = item_alloc(key, it->nkey, flags,
+                                    old_it->exptime,
+                                    it->nbytes + old_it->nbytes - 2 /* CRLF */);
+                pthread_mutex_lock(&p->mutex);
 
                 if (new_it == NULL) {
                     /* SERVER_ERROR out of memory */
                     if (old_it != NULL)
-                        do_item_remove(old_it);
+                        do_item_remove(old_it, p);
 
                     return NOT_STORED;
                 }
@@ -1928,9 +1932,9 @@ enum store_item_type do_store_item(item *it, int comm, conn *c) {
 
         if (stored == NOT_STORED) {
             if (old_it != NULL)
-                item_replace(old_it, it);
+                do_item_replace(old_it, it, p);
             else
-                do_item_link(it);
+                do_item_link(it, p);
 
             c->cas = ITEM_get_cas(it);
 
@@ -1939,9 +1943,9 @@ enum store_item_type do_store_item(item *it, int comm, conn *c) {
     }
 
     if (old_it != NULL)
-        do_item_remove(old_it);         /* release our reference */
+        do_item_remove(old_it, p);         /* release our reference */
     if (new_it != NULL)
-        do_item_remove(new_it);
+        do_item_remove(new_it, p);
 
     return stored;
 }
@@ -2207,7 +2211,11 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         }
 
         buf = item_cachedump(id, limit, &bytes);
-        write_and_free(c, buf, bytes);
+        if (buf == NULL) {
+            out_string(c, "CLIENT_ERROR Invalid class id or out of memory");
+        } else {
+            write_and_free(c, buf, bytes);
+        }
         return ;
     } else {
         /* getting here means that the subcommand is either engine specific or
@@ -2553,11 +2561,12 @@ static void process_arithmetic_command(conn *c, token_t *tokens, const size_t nt
  *
  * returns a response string to send back to the client.
  */
-enum delta_result_type do_add_delta(conn *c, item *it, const bool incr,
-                                    const int64_t delta, char *buf) {
+enum delta_result_type add_delta(conn *c, item *it, const bool incr,
+                                 const int64_t delta, char *buf) {
     char *ptr;
     uint64_t value;
     int res;
+    partition_t *p = get_partition_by_hash(it->hash);
 
     ptr = ITEM_data(it);
 
@@ -2565,6 +2574,7 @@ enum delta_result_type do_add_delta(conn *c, item *it, const bool incr,
         return NON_NUMERIC;
     }
 
+    pthread_mutex_lock(&p->mutex);
     if (incr) {
         value += delta;
         MEMCACHED_COMMAND_INCR(c->sfd, ITEM_key(it), it->nkey, value);
@@ -2589,14 +2599,23 @@ enum delta_result_type do_add_delta(conn *c, item *it, const bool incr,
     res = strlen(buf);
     if (res + 2 > it->nbytes) { /* need to realloc */
         item *new_it;
-        new_it = do_item_alloc(ITEM_key(it), it->nkey, atoi(ITEM_suffix(it) + 1), it->exptime, res + 2 );
+        /* we need to release the mutex, because do_item_alloc may try
+         * to grab it!
+         */
+        pthread_mutex_unlock(&p->mutex);
+        new_it = item_alloc(ITEM_key(it), it->nkey,
+                            atoi(ITEM_suffix(it) + 1),
+                            it->exptime, res + 2 );
         if (new_it == 0) {
             return EOM;
         }
+
+        pthread_mutex_lock(&p->mutex);
         memcpy(ITEM_data(new_it), buf, res);
         memcpy(ITEM_data(new_it) + res, "\r\n", 2);
-        item_replace(it, new_it);
-        do_item_remove(new_it);       /* release our reference */
+
+        do_item_replace(it, new_it, p);
+        do_item_remove(new_it, p);       /* release our reference */
     } else { /* replace in-place */
         /* When changing the value without replacing the item, we
            need to update the CAS on the existing item. */
@@ -2606,6 +2625,7 @@ enum delta_result_type do_add_delta(conn *c, item *it, const bool incr,
         memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
     }
 
+    pthread_mutex_unlock(&p->mutex);
     return OK;
 }
 
@@ -4181,9 +4201,8 @@ int main (int argc, char **argv) {
     main_base = event_init();
 
     /* initialize other stuff */
-    item_init();
+    partition_init();
     stats_init();
-    assoc_init();
     conn_init();
     slabs_init(settings.maxbytes, settings.factor, preallocate);
 
@@ -4199,10 +4218,6 @@ int main (int argc, char **argv) {
     thread_init(settings.num_threads, main_base);
     /* save the PID in if we're a daemon, do this after thread_init due to
        a file descriptor handling bug somewhere in libevent */
-
-    if (start_assoc_maintenance_thread() == -1) {
-        exit(EXIT_FAILURE);
-    }
 
     if (do_daemonize)
         save_pid(getpid(), pid_file);
@@ -4255,8 +4270,6 @@ int main (int argc, char **argv) {
 
     /* enter the event loop */
     event_base_loop(main_base, 0);
-
-    stop_assoc_maintenance_thread();
 
     /* remove the PID file if we're a daemon */
     if (do_daemonize)

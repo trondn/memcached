@@ -6,6 +6,9 @@ use FindBin qw($Bin);
 use lib "$Bin/lib";
 use MemcachedTest;
 
+# The LRU works pr. partition.. Force only one..
+$ENV{"PARTITION_SIZE"} = "1";
+
 # assuming max slab is 1M and default mem is 64M
 my $server = new_memcached();
 my $sock = $server->sock;
