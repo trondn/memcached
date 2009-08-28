@@ -3190,7 +3190,7 @@ static enum transmit_result transmit(conn *c) {
 
 static void drive_machine(conn *c) {
     bool stop = false;
-    int sfd, flags = 1;
+    int sfd;
     socklen_t addrlen;
     struct sockaddr_storage addr;
     int nreqs = settings.reqs_per_event;
@@ -3218,13 +3218,26 @@ static void drive_machine(conn *c) {
                 }
                 break;
             }
+
+#ifdef __linux
+            /* The socket created by accept() will inherit the properties
+             * from c->sfd on systems implementing BSD sockets.
+             * The network stack on Linux works differently and doesn't
+             * inherit any properties.
+             */
+            int flags;
             if ((flags = fcntl(sfd, F_GETFL, 0)) < 0 ||
                 fcntl(sfd, F_SETFL, flags | O_NONBLOCK) < 0) {
                 perror("setting O_NONBLOCK");
                 close(sfd);
                 break;
             }
+#elif !defined(NDEBUG)
+            int flags;
+            assert((flags = fcntl(sfd, F_GETFL, 0)) != -1 &&
+                   (flags & O_NONBLOCK) == O_NONBLOCK);
 
+#endif
             dispatch_conn_new(sfd, conn_new_cmd, EV_READ | EV_PERSIST,
                                      DATA_BUFFER_SIZE, tcp_transport);
             stop = true;
