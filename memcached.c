@@ -384,6 +384,10 @@ static inline void safe_close(int sfd) {
             settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
                                             "Failed to close socket %d (%s)!!\n", (int)sfd,
                                             strerror(errno));
+        } else {
+            STATS_LOCK();
+            stats.curr_conns--;
+            STATS_UNLOCK();
         }
     }
 }
@@ -678,7 +682,7 @@ static void conn_cleanup(conn *c) {
     c->engine_storage = NULL;
     c->tap_iterator = NULL;
     c->thread = NULL;
-    c->next = NULL;
+    assert(c->next == NULL);
     c->ascii_cmd = NULL;
     c->pending_close.active = false;
     c->sfd = -1;
@@ -700,9 +704,10 @@ void conn_close(conn *c) {
     }
 
     MEMCACHED_CONN_RELEASE(c->sfd);
+    safe_close(c->sfd);
+    c->sfd = -1;
     if (!c->pending_close.active) {
         perform_callbacks(ON_DISCONNECT, NULL, c);
-        safe_close(c->sfd);
 
         LOCK_THREAD(c->thread);
         /* remove from pending-io list */
@@ -739,10 +744,6 @@ void conn_close(conn *c) {
      */
     conn_reset_buffersize(c);
     cache_free(conn_cache, c);
-
-    STATS_LOCK();
-    stats.curr_conns--;
-    STATS_UNLOCK();
 
     return;
 }
@@ -5054,8 +5055,11 @@ bool conn_closing(conn *c) {
         c->pending_close.active = true;
         safe_close(c->sfd);
         c->sfd = -1;
-        c->next = c->thread->pending_close;
-        c->thread->pending_close = c;
+        if (!list_contains(c->thread->pending_close, c)) {
+            c->next = c->thread->pending_close;
+            c->thread->pending_close = c;
+        }
+        assert(!has_cycle(c->thread->pending_close));
         UNLOCK_THREAD(c->thread);
 
         /*
@@ -5087,6 +5091,7 @@ bool conn_add_tap_client(conn *c) {
     assert(c->next == NULL);
     c->next = tap_thread.pending_io;
     tp->pending_io = c;
+    assert(!has_cycle(c));
     assert(number_of_pending(c, tp->pending_io) == 1);
     UNLOCK_THREAD(tp);
 
@@ -5133,40 +5138,65 @@ void event_handler(const int fd, const short which, void *arg) {
     }
 
     // Do we have pending closes?
+    bool running_pending_close = false;
+    conn *pending_close = NULL;
     if (c->thread != NULL) {
-        pthread_mutex_lock(&c->thread->mutex);
-        if (c->thread->pending_close != NULL &&
-            c->thread->last_checked != current_time)
-        {
-            c->thread->last_checked = current_time;
-            bool done;
-            do {
-                done = true;
-                conn *prev = NULL;
-                for (conn* ce = c->thread->pending_close;
-                     ce != NULL;
-                     prev = ce, ce = ce->next)
-                {
-                    if (ce->pending_close.timeout < current_time) {
-                        fprintf(stderr, "OK, time to nuke: %p\n",
-                                (void*)ce);
-                        conn_closing(ce);
-                        // @todo fixme!
-                        if (ce == c->thread->pending_close) {
-                            c->thread->pending_close = ce->next;
-                        } else {
-                            prev->next = ce->next;
-                        }
-                        done = false;
-                    }
-                }
-            } while (!done);
+        LIBEVENT_THREAD *me = c->thread;
+        LOCK_THREAD(me);
+        if (me->pending_close && me->last_checked != current_time) {
+            assert(!has_cycle(me->pending_close));
+            me->last_checked = current_time;
+            pending_close = me->pending_close;
+            me->pending_close = NULL;
+            running_pending_close = true;
         }
-        pthread_mutex_unlock(&c->thread->mutex);
+        UNLOCK_THREAD(me);
     }
 
     while (c->state(c)) {
         /* do task */
+    }
+
+    /* Close any connections pending close */
+    if (running_pending_close) {
+        LIBEVENT_THREAD *me = c->thread;
+        bool done;
+        do {
+            done = true;
+            conn *prev = NULL;
+            assert(!has_cycle(pending_close));
+            for (conn* ce = pending_close; ce != NULL; prev = ce, ce = ce->next) {
+                if (ce->pending_close.timeout < current_time) {
+                    fprintf(stderr, "OK, time to nuke: %p\n", (void*)ce);
+                    if (ce == pending_close) {
+                        assert(ce->next != ce);
+                        pending_close = ce->next;
+                    } else {
+                        assert(prev != ce);
+                        prev->next = ce->next;
+                    }
+                    ce->next = NULL;
+                    conn_close(ce);
+                    done = false;
+                    assert(!has_cycle(pending_close));
+                }
+            }
+        } while (!done);
+        assert(!has_cycle(pending_close));
+
+        /* Stitch the remaining pending close lists back together */
+        LOCK_THREAD(me);
+        while (pending_close) {
+            /* Seek because we're probably going to mutate c->next */
+            conn *c = pending_close;
+            pending_close = pending_close->next;
+            if (!list_contains(me->pending_close, c)) {
+                c->next = me->pending_close;
+                me->pending_close = c;
+            }
+        }
+        assert(!has_cycle(me->pending_close));
+        UNLOCK_THREAD(me);
     }
 }
 

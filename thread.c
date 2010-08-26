@@ -332,6 +332,30 @@ static void thread_libevent_process(int fd, short which, void *arg) {
 
 extern volatile rel_time_t current_time;
 
+bool has_cycle(conn *c) {
+    if (!c) {
+        return false;
+    }
+    conn *slowNode, *fastNode1, *fastNode2;
+    slowNode = fastNode1 = fastNode2 = c;
+    while (slowNode && (fastNode1 = fastNode2->next) && (fastNode2 = fastNode1->next)) {
+        if (slowNode == fastNode1 || slowNode == fastNode2) {
+            return true;
+        }
+        slowNode = slowNode->next;
+    }
+    return false;
+}
+
+bool list_contains(conn *haystack, conn *needle) {
+    for (; haystack; haystack = haystack -> next) {
+        if (needle == haystack) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void libevent_tap_process(int fd, short which, void *arg) {
     LIBEVENT_THREAD *me = arg;
     assert(me->type == TAP);
@@ -351,37 +375,24 @@ static void libevent_tap_process(int fd, short which, void *arg) {
     }
 
     // Do we have pending closes?
-    pthread_mutex_lock(&me->mutex);
-    if (me->pending_close != NULL && me->last_checked != current_time) {
+    LOCK_THREAD(me);
+    conn *pending_close = NULL;
+    bool running_pending_close = false;
+    if (me->pending_close && me->last_checked != current_time) {
+        assert(!has_cycle(me->pending_close));
         me->last_checked = current_time;
-        bool done;
-        do {
-            done = true;
-            conn *prev = NULL;
-            for (conn* ce = me->pending_close; ce != NULL; prev = ce, ce = ce->next) {
-                if (ce->pending_close.timeout < current_time) {
-                    fprintf(stderr, "OK, time to nuke: %p\n", (void*)ce);
-                    conn_closing(ce);
-                    // @todo fixme!
-                    if (ce == me->pending_close) {
-                        me->pending_close = ce->next;
-                    } else {
-                        prev->next = ce->next;
-                    }
-                    done = false;
-                }
-            }
-        } while (!done);
+        pending_close = me->pending_close;
+        me->pending_close = NULL;
+        running_pending_close = true;
     }
 
     // Now copy the pending IO buffer and run them...
     conn* pending = NULL;
-    pthread_mutex_lock(&me->mutex);
     if (me->pending_io != NULL) {
         pending = me->pending_io;
         me->pending_io = NULL;
     }
-    pthread_mutex_unlock(&me->mutex);
+    UNLOCK_THREAD(me);
     while (pending != NULL) {
         conn *c = pending;
 
@@ -400,6 +411,48 @@ static void libevent_tap_process(int fd, short which, void *arg) {
         while (c->state(c)) {
             /* do task */
         }
+    }
+
+    /* Close any connections pending close */
+    if (running_pending_close) {
+
+        bool done;
+        do {
+            done = true;
+            conn *prev = NULL;
+            assert(!has_cycle(pending_close));
+            for (conn* ce = pending_close; ce != NULL; prev = ce, ce = ce->next) {
+                if (ce->pending_close.timeout < current_time) {
+                    fprintf(stderr, "OK, time to nuke: %p\n", (void*)ce);
+                    if (ce == pending_close) {
+                        assert(ce->next != ce);
+                        pending_close = ce->next;
+                    } else {
+                        assert(prev != ce);
+                        prev->next = ce->next;
+                    }
+                    ce->next = NULL;
+                    conn_close(ce);
+                    done = false;
+                    assert(!has_cycle(pending_close));
+                }
+            }
+        } while (!done);
+        assert(!has_cycle(pending_close));
+
+        /* Stitch the remaining pending close lists back together */
+        LOCK_THREAD(me);
+        while (pending_close) {
+            /* Seek because we're probably going to mutate c->next */
+            conn *c = pending_close;
+            pending_close = pending_close->next;
+            if (!list_contains(me->pending_close, c)) {
+                c->next = me->pending_close;
+                me->pending_close = c;
+            }
+        }
+        assert(!has_cycle(me->pending_close));
+        UNLOCK_THREAD(me);
     }
 }
 

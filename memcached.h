@@ -280,6 +280,7 @@ typedef struct {
     }
 
 
+
 extern LIBEVENT_THREAD tap_thread;
 
 typedef struct {
@@ -451,6 +452,8 @@ void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status);
 
 // Number of times this connection is in the given pending list
 int number_of_pending(conn *c, conn *pending);
+bool has_cycle(conn *c);
+bool list_contains(conn *h, conn *n);
 
 void init_check_stdin(struct event_base *base);
 
