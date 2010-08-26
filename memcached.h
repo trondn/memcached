@@ -260,6 +260,9 @@ typedef struct {
     struct conn *pending_io;    /* List of connection with pending async io ops */
     int index;                  /* index of this thread in the threads array */
     enum thread_type type;      /* Type of IO this thread processes */
+
+    rel_time_t last_checked;
+    struct conn *pending_close; /* list of connections close at a later time */
 } LIBEVENT_THREAD;
 
 #define LOCK_THREAD(t)                          \
@@ -391,6 +394,11 @@ struct conn {
     ENGINE_ERROR_CODE aiostat;
     bool ewouldblock;
     TAP_ITERATOR tap_iterator;
+
+    struct {
+        bool active;
+        rel_time_t  timeout;
+    } pending_close;
 };
 
 /*
@@ -445,6 +453,9 @@ void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status);
 int number_of_pending(conn *c, conn *pending);
 
 void init_check_stdin(struct event_base *base);
+
+void conn_close(conn *c);
+
 
 #if HAVE_DROP_PRIVILEGES
 extern void drop_privileges(void);

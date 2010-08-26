@@ -330,6 +330,8 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     }
 }
 
+extern volatile rel_time_t current_time;
+
 static void libevent_tap_process(int fd, short which, void *arg) {
     LIBEVENT_THREAD *me = arg;
     assert(me->type == TAP);
@@ -348,6 +350,31 @@ static void libevent_tap_process(int fd, short which, void *arg) {
         }
     }
 
+    // Do we have pending closes?
+    pthread_mutex_lock(&me->mutex);
+    if (me->pending_close != NULL && me->last_checked != current_time) {
+        me->last_checked = current_time;
+        bool done;
+        do {
+            done = true;
+            conn *prev = NULL;
+            for (conn* ce = me->pending_close; ce != NULL; prev = ce, ce = ce->next) {
+                if (ce->pending_close.timeout < current_time) {
+                    fprintf(stderr, "OK, time to nuke: %p\n", (void*)ce);
+                    conn_closing(ce);
+                    // @todo fixme!
+                    if (ce == me->pending_close) {
+                        me->pending_close = ce->next;
+                    } else {
+                        prev->next = ce->next;
+                    }
+                    done = false;
+                }
+            }
+        } while (!done);
+    }
+
+    // Now copy the pending IO buffer and run them...
     conn* pending = NULL;
     pthread_mutex_lock(&me->mutex);
     if (me->pending_io != NULL) {
@@ -379,6 +406,31 @@ static void libevent_tap_process(int fd, short which, void *arg) {
 void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status)
 {
     struct conn *conn = (struct conn *)cookie;
+
+
+    /*
+    ** TROND:
+    **   I changed the logic for the tap connections so that the core
+    **   issues the ON_DISCONNECT call to the engine instead of trying
+    **   to close the connection. Then it let's the engine have a grace
+    **   period to call notify_io_complete if not it will go ahead and
+    **   kill it.
+    **
+    */
+    if (conn->thread == &tap_thread) {
+        LOCK_THREAD(conn->thread);
+        if (conn->pending_close.active) {
+            conn->pending_close.timeout = 0;
+            if (write(conn->thread->notify_send_fd, "", 1) != 1) {
+                settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
+                                                "Writing to thread notify pipe: %s",
+                                                strerror(errno));
+                UNLOCK_THREAD(conn->thread);
+                return ;
+            }
+        }
+        UNLOCK_THREAD(conn->thread);
+    }
 
     /*
     ** There may be a race condition between the engine calling this

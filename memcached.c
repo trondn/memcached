@@ -152,7 +152,7 @@ volatile sig_atomic_t memcached_shutdown;
  * rather than absolute UNIX timestamps, a space savings on systems where
  * sizeof(time_t) > sizeof(unsigned int).
  */
-static volatile rel_time_t current_time;
+volatile rel_time_t current_time;
 
 /*
  * forward declarations
@@ -189,7 +189,6 @@ static void settings_init(void);
 
 /* event handling, network IO */
 static void event_handler(const int fd, const short which, void *arg);
-static void conn_close(conn *c);
 static bool update_event(conn *c, const int new_flags);
 static void complete_nread(conn *c);
 static void process_command(conn *c, char *command);
@@ -681,9 +680,11 @@ static void conn_cleanup(conn *c) {
     c->thread = NULL;
     c->next = NULL;
     c->ascii_cmd = NULL;
+    c->pending_close.active = false;
+    c->sfd = -1;
 }
 
-static void conn_close(conn *c) {
+void conn_close(conn *c) {
     assert(c != NULL);
 
     /* delete the event, the socket and the conn */
@@ -698,32 +699,36 @@ static void conn_close(conn *c) {
         c->ascii_cmd->abort(c->ascii_cmd, c);
     }
 
-    perform_callbacks(ON_DISCONNECT, NULL, c);
     MEMCACHED_CONN_RELEASE(c->sfd);
+    if (!c->pending_close.active) {
+        perform_callbacks(ON_DISCONNECT, NULL, c);
+        safe_close(c->sfd);
 
-    safe_close(c->sfd);
-
-    LOCK_THREAD(c->thread);
-    /* remove from pending-io list */
-    conn* pending = c->thread->pending_io;
-    conn* prev = NULL;
-    while (pending) {
-        if (pending == c) {
-            if (settings.verbose > 1) {
-                settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
-                                                "Current connection was in the pending-io list.. Nuking it\n");
+        LOCK_THREAD(c->thread);
+        /* remove from pending-io list */
+        conn* pending = c->thread->pending_io;
+        conn* prev = NULL;
+        while (pending) {
+            if (pending == c) {
+                if (settings.verbose > 1) {
+                    settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
+                                                    "Current connection was in the pending-io list.. Nuking it\n");
+                }
+                if (prev == NULL) {
+                    c->thread->pending_io = c->next;
+                } else {
+                    prev->next = c->next;
+                }
             }
-            if (prev == NULL) {
-                c->thread->pending_io = c->next;
-            } else {
-                prev->next = c->next;
-            }
+            prev = pending;
+            pending = pending->next;
         }
-        prev = pending;
-        pending = pending->next;
-    }
 
-    UNLOCK_THREAD(c->thread);
+        UNLOCK_THREAD(c->thread);
+    } else {
+        settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
+                                        "Running delayed close for tap connection\n");
+    }
 
     conn_cleanup(c);
 
@@ -4721,6 +4726,13 @@ bool conn_listening(conn *c)
  */
 bool conn_ship_log(conn *c) {
     bool cont = false;
+
+    if (c->pending_close.active) {
+        // Remove the event if it is present..
+        event_del(&c->event);
+        return false;
+    }
+
     short mask = EV_READ | EV_PERSIST | EV_WRITE;
 
     if (c->which & EV_READ) {
@@ -5032,10 +5044,31 @@ bool conn_mwrite(conn *c) {
 }
 
 bool conn_closing(conn *c) {
-    if (IS_UDP(c->transport)) {
-        conn_cleanup(c);
+    if (c->thread == &tap_thread) {
+        settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
+                                        "Tap client connect closed (%d)."
+                                        " Putting it in pending close\n",
+                                        c->sfd);
+        LOCK_THREAD(c->thread);
+        c->pending_close.timeout = current_time + 5;
+        c->pending_close.active = true;
+        safe_close(c->sfd);
+        c->sfd = -1;
+        c->next = c->thread->pending_close;
+        c->thread->pending_close = c;
+        UNLOCK_THREAD(c->thread);
+
+        /*
+         * tell the tap connection that we're disconnecting it now,
+         * but give it a grace period
+         */
+        perform_callbacks(ON_DISCONNECT, NULL, c);
     } else {
-        conn_close(c);
+        if (IS_UDP(c->transport)) {
+            conn_cleanup(c);
+        } else {
+            conn_close(c);
+        }
     }
 
     return false;
@@ -5097,6 +5130,39 @@ void event_handler(const int fd, const short which, void *arg) {
     c->nevents = settings.reqs_per_event;
     if (c->state == conn_ship_log) {
         c->nevents = settings.reqs_per_tap_event;
+    }
+
+    // Do we have pending closes?
+    if (c->thread != NULL) {
+        pthread_mutex_lock(&c->thread->mutex);
+        if (c->thread->pending_close != NULL &&
+            c->thread->last_checked != current_time)
+        {
+            c->thread->last_checked = current_time;
+            bool done;
+            do {
+                done = true;
+                conn *prev = NULL;
+                for (conn* ce = c->thread->pending_close;
+                     ce != NULL;
+                     prev = ce, ce = ce->next)
+                {
+                    if (ce->pending_close.timeout < current_time) {
+                        fprintf(stderr, "OK, time to nuke: %p\n",
+                                (void*)ce);
+                        conn_closing(ce);
+                        // @todo fixme!
+                        if (ce == c->thread->pending_close) {
+                            c->thread->pending_close = ce->next;
+                        } else {
+                            prev->next = ce->next;
+                        }
+                        done = false;
+                    }
+                }
+            } while (!done);
+        }
+        pthread_mutex_unlock(&c->thread->mutex);
     }
 
     while (c->state(c)) {
