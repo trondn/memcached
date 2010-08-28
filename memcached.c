@@ -5061,7 +5061,7 @@ bool conn_closing(conn *c) {
     if (c->thread == &tap_thread) {
         if (!c->pending_close.active) {
             assert(c->sfd != -1);
-            settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
+            settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
                                             "Tap client connect closed (%d)."
                                             " Putting it in pending close\n",
                                             c->sfd);
