@@ -449,11 +449,14 @@ void append_stat(const char *name, ADD_STAT add_stats, conn *c,
                  const char *fmt, ...);
 
 void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status);
+void conn_set_state(conn *c, STATE_FUNC state);
 
 // Number of times this connection is in the given pending list
 int number_of_pending(conn *c, conn *pending);
 bool has_cycle(conn *c);
 bool list_contains(conn *h, conn *n);
+conn *list_remove(conn *h, conn *n);
+size_t list_to_array(conn **dest, size_t max_items, conn **l);
 
 void init_check_stdin(struct event_base *base);
 

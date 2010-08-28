@@ -309,12 +309,9 @@ static void thread_libevent_process(int fd, short which, void *arg) {
         cqi_free(item);
     }
 
-    conn* pending = NULL;
     pthread_mutex_lock(&me->mutex);
-    if (me->pending_io != NULL) {
-        pending = me->pending_io;
-        me->pending_io = NULL;
-    }
+    conn* pending = me->pending_io;
+    me->pending_io = NULL;
     pthread_mutex_unlock(&me->mutex);
     while (pending != NULL) {
         conn *c = pending;
@@ -356,6 +353,30 @@ bool list_contains(conn *haystack, conn *needle) {
     return false;
 }
 
+conn* list_remove(conn *haystack, conn *needle) {
+    if (!haystack) {
+        return NULL;
+    }
+
+    if (haystack == needle) {
+        return haystack->next;
+    }
+
+    haystack->next = list_remove(haystack->next, needle);
+
+    return haystack;
+}
+
+size_t list_to_array(conn **dest, size_t max_items, conn **l) {
+    size_t n_items = 0;
+    for (; *l && n_items < max_items - 1; ++n_items) {
+        dest[n_items] = *l;
+        *l = dest[n_items]->next;
+        dest[n_items]->next = NULL;
+    }
+    return n_items;
+}
+
 static void libevent_tap_process(int fd, short which, void *arg) {
     LIBEVENT_THREAD *me = arg;
     assert(me->type == TAP);
@@ -375,34 +396,41 @@ static void libevent_tap_process(int fd, short which, void *arg) {
     }
 
     // Do we have pending closes?
+    const size_t max_items = 256;
     LOCK_THREAD(me);
-    conn *pending_close = NULL;
-    bool running_pending_close = false;
+    conn *pending_close[max_items];
+    size_t n_pending_close = 0;
+
     if (me->pending_close && me->last_checked != current_time) {
         assert(!has_cycle(me->pending_close));
         me->last_checked = current_time;
-        pending_close = me->pending_close;
-        me->pending_close = NULL;
-        running_pending_close = true;
+
+        n_pending_close = list_to_array(pending_close, max_items,
+                                        &me->pending_close);
     }
 
     // Now copy the pending IO buffer and run them...
-    conn* pending = NULL;
-    if (me->pending_io != NULL) {
-        pending = me->pending_io;
-        me->pending_io = NULL;
+    conn *pending_io[max_items];
+    size_t n_items = list_to_array(pending_io, max_items, &me->pending_io);
+
+    if (n_items > 0 && settings.verbose > 1) {
+        fprintf(stderr, "Going to handle tap io for ");
+        for (size_t i = 0; i < n_items; ++i) {
+            fprintf(stderr, "%d ", pending_io[i]->sfd);
+        }
+        fprintf(stderr, "\n");
     }
+
     UNLOCK_THREAD(me);
-    while (pending != NULL) {
-        conn *c = pending;
+    for (size_t i = 0; i < n_items; ++i) {
+        conn *c = pending_io[i];
 
         assert(c->thread == me);
 
         LOCK_THREAD(c->thread);
         assert(me == c->thread);
-        pending = pending->next;
-        c->next = NULL;
-        assert(number_of_pending(c, pending) == 0);
+        settings.extensions.logger->log(EXTENSION_LOG_DEBUG, NULL,
+                                        "Processing tap pending_io for %d\n", c->sfd);
 
         UNLOCK_THREAD(me);
         c->nevents = settings.reqs_per_tap_event;
@@ -414,45 +442,23 @@ static void libevent_tap_process(int fd, short which, void *arg) {
     }
 
     /* Close any connections pending close */
-    if (running_pending_close) {
-
-        bool done;
-        do {
-            done = true;
-            conn *prev = NULL;
-            assert(!has_cycle(pending_close));
-            for (conn* ce = pending_close; ce != NULL; prev = ce, ce = ce->next) {
-                if (ce->pending_close.timeout < current_time) {
-                    fprintf(stderr, "OK, time to nuke: %p\n", (void*)ce);
-                    if (ce == pending_close) {
-                        assert(ce->next != ce);
-                        pending_close = ce->next;
-                    } else {
-                        assert(prev != ce);
-                        prev->next = ce->next;
-                    }
-                    ce->next = NULL;
-                    conn_close(ce);
-                    done = false;
-                    assert(!has_cycle(pending_close));
-                }
-            }
-        } while (!done);
-        assert(!has_cycle(pending_close));
-
-        /* Stitch the remaining pending close lists back together */
-        LOCK_THREAD(me);
-        while (pending_close) {
-            /* Seek because we're probably going to mutate c->next */
-            conn *c = pending_close;
-            pending_close = pending_close->next;
-            if (!list_contains(me->pending_close, c)) {
-                c->next = me->pending_close;
-                me->pending_close = c;
+    if (n_pending_close > 0) {
+        for (size_t i = 0; i < n_pending_close; ++i) {
+            conn *ce = pending_close[i];
+            if (ce->pending_close.active && ce->pending_close.timeout < current_time) {
+                settings.extensions.logger->log(EXTENSION_LOG_DEBUG, NULL,
+                                                "OK, time to nuke: %p\n (%d)", (void*)ce,
+                                                ce->sfd);
+                assert(ce->next == NULL);
+                conn_set_state(ce, conn_closing);
+            } else {
+                LOCK_THREAD(me);
+                ce->next = me->pending_close;
+                me->pending_close = ce;
+                assert(!has_cycle(me->pending_close));
+                UNLOCK_THREAD(me);
             }
         }
-        assert(!has_cycle(me->pending_close));
-        UNLOCK_THREAD(me);
     }
 }
 
@@ -460,6 +466,9 @@ void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status)
 {
     struct conn *conn = (struct conn *)cookie;
 
+    settings.extensions.logger->log(EXTENSION_LOG_DEBUG, NULL,
+                                    "Got notify from %d, status %x\n",
+                                    conn->sfd, status);
 
     /*
     ** TROND:
@@ -472,7 +481,7 @@ void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status)
     */
     if (conn->thread == &tap_thread) {
         LOCK_THREAD(conn->thread);
-        if (conn->pending_close.active) {
+        if (status == ENGINE_DISCONNECT) {
             conn->pending_close.timeout = 0;
             if (write(conn->thread->notify_send_fd, "", 1) != 1) {
                 settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
@@ -513,16 +522,24 @@ void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status)
      */
     if (status == ENGINE_DISCONNECT) {
         conn->state = conn_closing;
-    }
-
-    if (number_of_pending(conn, thr->pending_io) == 0) {
-        if (thr->pending_io == NULL) {
-            notify = 1;
+        notify = 1;
+        thr->pending_io = list_remove(thr->pending_io, conn);
+        if (number_of_pending(conn, thr->pending_close) == 0) {
+            conn->next = thr->pending_close;
+            thr->pending_close = conn;
         }
-        conn->next = thr->pending_io;
-        thr->pending_io = conn;
+    } else {
+        if (number_of_pending(conn, thr->pending_io) +
+            number_of_pending(conn, thr->pending_close) == 0) {
+            if (thr->pending_io == NULL) {
+                notify = 1;
+            }
+            conn->next = thr->pending_io;
+            thr->pending_io = conn;
+        }
     }
-    assert(number_of_pending(conn, thr->pending_io) == 1);
+    assert(number_of_pending(conn, thr->pending_io) +
+           number_of_pending(conn, thr->pending_close) == 1);
     UNLOCK_THREAD(thr);
 
     /* kick the thread in the butt */
