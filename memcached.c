@@ -548,6 +548,8 @@ conn *conn_new(const int sfd, STATE_FUNC init_state,
         return NULL;
     }
 
+    assert(c->thread == NULL);
+
     if (c->rsize < read_buffer_size) {
         void *mem = malloc(read_buffer_size);
         if (mem) {
@@ -555,6 +557,7 @@ conn *conn_new(const int sfd, STATE_FUNC init_state,
             free(c->rbuf);
             c->rbuf = mem;
         } else {
+            assert(c->thread == NULL);
             cache_free(conn_cache, c);
             return NULL;
         }
@@ -630,6 +633,7 @@ conn *conn_new(const int sfd, STATE_FUNC init_state,
         settings.extensions.logger->log(EXTENSION_LOG_WARNING,
                                         NULL,
                                         "Failed to add connection to libevent: %s", strerror(errno));
+        assert(c->thread == NULL);
         cache_free(conn_cache, c);
         return NULL;
     }
@@ -743,6 +747,7 @@ void conn_close(conn *c) {
      * size
      */
     conn_reset_buffersize(c);
+    assert(c->thread == NULL);
     cache_free(conn_cache, c);
 
     return;
