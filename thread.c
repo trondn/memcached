@@ -446,11 +446,10 @@ static void libevent_tap_process(int fd, short which, void *arg) {
         for (size_t i = 0; i < n_pending_close; ++i) {
             conn *ce = pending_close[i];
             if (ce->pending_close.active && ce->pending_close.timeout < current_time) {
-                settings.extensions.logger->log(EXTENSION_LOG_DEBUG, NULL,
-                                                "OK, time to nuke: %p\n (%d)", (void*)ce,
-                                                ce->sfd);
+                settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
+                                                "OK, time to nuke: %p (%d < %d)\n", (void*)ce, ce->pending_close.timeout, current_time);
                 assert(ce->next == NULL);
-                conn_set_state(ce, conn_closing);
+                conn_close(ce);
             } else {
                 LOCK_THREAD(me);
                 ce->next = me->pending_close;
@@ -460,6 +459,15 @@ static void libevent_tap_process(int fd, short which, void *arg) {
             }
         }
     }
+}
+
+static bool is_thread_me(LIBEVENT_THREAD *thr) {
+#ifdef __WIN32__
+    pthread_t tid = pthread_self();
+    return(tid.p == thr->thread_id.p && tid.x == thr->thread_id.x);
+#else
+    return pthread_self() == thr->thread_id;
+#endif
 }
 
 void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status)
@@ -479,19 +487,31 @@ void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status)
     **   kill it.
     **
     */
-    if (conn->thread == &tap_thread) {
+    if (status == ENGINE_DISCONNECT && conn->thread == &tap_thread) {
         LOCK_THREAD(conn->thread);
-        if (status == ENGINE_DISCONNECT) {
-            conn->pending_close.timeout = 0;
+        if (conn->sfd != -1) {
+            event_del(&conn->event);
+            safe_close(conn->sfd);
+            conn->sfd = -1;
+        }
+
+        conn->pending_close.timeout = 0;
+        settings.extensions.logger->log(EXTENSION_LOG_DEBUG, NULL,
+                                        "Immediate close of %p\n",
+                                        conn);
+        conn_set_state(conn, conn_immediate_close);
+
+        if (!is_thread_me(conn->thread)) {
+            /* kick the thread in the butt */
             if (write(conn->thread->notify_send_fd, "", 1) != 1) {
                 settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
                                                 "Writing to thread notify pipe: %s",
                                                 strerror(errno));
-                UNLOCK_THREAD(conn->thread);
-                return ;
             }
         }
+
         UNLOCK_THREAD(conn->thread);
+        return;
     }
 
     /*
@@ -764,6 +784,7 @@ void thread_init(int nthr, struct event_base *main_base) {
     /* Create threads after we've done all the libevent setup. */
     for (i = 0; i < nthreads; i++) {
         create_worker(worker_libevent, &threads[i], &thread_ids[i]);
+        threads[i].thread_id = thread_ids[i];
     }
 
 #ifdef __WIN32__
@@ -787,6 +808,7 @@ void thread_init(int nthr, struct event_base *main_base) {
     tap_thread.index = i;
     setup_thread(&tap_thread, true);
     create_worker(worker_libevent, &tap_thread, &tap_thread_id);
+    tap_thread.thread_id = tap_thread_id;
 
     /* Wait for all the threads to set themselves up before returning. */
     pthread_mutex_lock(&init_lock);

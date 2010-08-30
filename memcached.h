@@ -450,6 +450,9 @@ void append_stat(const char *name, ADD_STAT add_stats, conn *c,
 
 void notify_io_complete(const void *cookie, ENGINE_ERROR_CODE status);
 void conn_set_state(conn *c, STATE_FUNC state);
+const char *state_text(STATE_FUNC state);
+void safe_close(int sfd);
+
 
 // Number of times this connection is in the given pending list
 int number_of_pending(conn *c, conn *pending);
@@ -478,6 +481,8 @@ bool conn_parse_cmd(conn *c);
 bool conn_write(conn *c);
 bool conn_nread(conn *c);
 bool conn_swallow(conn *c);
+bool conn_pending_close(conn *c);
+bool conn_immediate_close(conn *c);
 bool conn_closing(conn *c);
 bool conn_mwrite(conn *c);
 bool conn_ship_log(conn *c);
