@@ -14,7 +14,6 @@
 #include <memcached/extension.h>
 
 #include "cache.h"
-#include "topkeys.h"
 
 #include "sasl_defs.h"
 
@@ -61,7 +60,6 @@
 #define CHUNK_ALIGN_BYTES 8
 #define DONT_PREALLOC_SLABS
 #define MAX_NUMBER_OF_SLAB_CLASSES (POWER_LARGEST + 1)
-
 
 #define STAT_KEY_LEN 128
 #define STAT_VAL_LEN 128
@@ -142,15 +140,6 @@ struct thread_stats {
     uint64_t          auth_cmds;
     uint64_t          auth_errors;
     struct slab_stats slab_stats[MAX_NUMBER_OF_SLAB_CLASSES];
-};
-
-
-/**
- * The stats structure the engine keeps track of
- */
-struct independent_stats {
-    topkeys_t *topkeys;
-    struct thread_stats thread_stats[];
 };
 
 /**

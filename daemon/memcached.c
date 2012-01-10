@@ -51,15 +51,12 @@ static inline void item_set_cas(const void *cookie, item *it, uint64_t cas) {
     SLAB_GUTS(conn, thread_stats, slab_op, thread_op) \
     THREAD_GUTS(conn, thread_stats, slab_op, thread_op)
 
-#define STATS_INCR1(GUTS, conn, slab_op, thread_op, key, nkey) { \
-    struct independent_stats *independent_stats = get_independent_stats(conn); \
-    struct thread_stats *thread_stats = \
-        &independent_stats->thread_stats[conn->thread->index]; \
-    topkeys_t *topkeys = independent_stats->topkeys; \
+#define STATS_INCR1(GUTS, conn, slab_op, thread_op, key, nkey) \
+{ \
+    struct thread_stats *thread_stats = get_thread_stats(conn);  \
     pthread_mutex_lock(&thread_stats->mutex); \
     GUTS(conn, thread_stats, slab_op, thread_op); \
     pthread_mutex_unlock(&thread_stats->mutex); \
-    TK(topkeys, slab_op, key, nkey, current_time); \
 }
 
 #define STATS_INCR(conn, op, key, nkey) \
@@ -122,7 +119,6 @@ volatile rel_time_t current_time;
  */
 static SOCKET new_socket(struct addrinfo *ai);
 static int try_read_command(conn *c);
-static inline struct independent_stats *get_independent_stats(conn *c);
 static inline struct thread_stats *get_thread_stats(conn *c);
 static void register_callback(ENGINE_HANDLE *eh,
                               ENGINE_EVENT_TYPE type,
@@ -157,12 +153,6 @@ static int ensure_iov_space(conn *c);
 static int add_iov(conn *c, const void *buf, int len);
 static int add_msghdr(conn *c);
 
-
-/* time handling */
-static void set_current_time(void);  /* update the global variable holding
-                              global 32-bit seconds-since-start time
-                              (to avoid 64 bit time_t) */
-
 /** exported globals **/
 struct stats stats;
 struct settings settings;
@@ -171,7 +161,7 @@ static time_t process_started;     /* when the process was started */
 /** file scope variables **/
 static conn *listen_conn = NULL;
 static struct event_base *main_base;
-static struct independent_stats *default_independent_stats;
+static struct thread_stats *default_thread_stats;
 
 static struct engine_event_handler *engine_event_handlers[MAX_ENGINE_EVENT_TYPE + 1];
 
@@ -244,7 +234,7 @@ static void stats_reset(const void *cookie) {
     stats.total_conns = 0;
     stats_prefix_clear();
     STATS_UNLOCK();
-    threadlocal_stats_reset(get_independent_stats(conn)->thread_stats);
+    threadlocal_stats_reset(get_thread_stats(conn));
     settings.engine.v1->reset_stats(settings.engine.v0, cookie);
 }
 
@@ -272,7 +262,6 @@ static void settings_init(void) {
     settings.backlog = 1024;
     settings.binding_protocol = negotiating_prot;
     settings.item_size_max = 1024 * 1024; /* The famous 1MB upper limit. */
-    settings.topkeys = 0;
     settings.require_sasl = false;
     settings.extensions.logger = get_stderr_logger();
 }
@@ -686,6 +675,10 @@ static void conn_cleanup(conn *c) {
         c->sasl_conn = NULL;
     }
 
+    if (IS_UDP(c->transport)) {
+        conn_set_state(c, conn_read);
+    }
+
     c->engine_storage = NULL;
     c->tap_iterator = NULL;
     c->thread = NULL;
@@ -1009,6 +1002,12 @@ static void out_string(conn *c, const char *str) {
         settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
                                         ">%d %s\n", c->sfd, str);
     }
+
+    /* Nuke a partial output... */
+    c->msgcurr = 0;
+    c->msgused = 0;
+    c->iovused = 0;
+    add_msghdr(c);
 
     /* Nuke a partial output... */
     c->msgcurr = 0;
@@ -1946,14 +1945,6 @@ static void process_bin_stat(conn *c) {
             }
         } else if (strncmp(subcommand, "aggregate", 9) == 0) {
             server_stats(&append_stats, c, true);
-        } else if (strncmp(subcommand, "topkeys", 7) == 0) {
-            topkeys_t *tk = get_independent_stats(c)->topkeys;
-            if (tk != NULL) {
-                topkeys_stats(tk, c, current_time, append_stats);
-            } else {
-                write_bin_packet(c, PROTOCOL_BINARY_RESPONSE_KEY_ENOENT, 0);
-                return;
-            }
         } else {
             ret = settings.engine.v1->get_stats(settings.engine.v0, c,
                                                 subcommand, nkey,
@@ -3672,10 +3663,7 @@ inline static void process_stats_detail(conn *c, const char *command) {
 }
 
 static void aggregate_callback(void *in, void *out) {
-    struct thread_stats *out_thread_stats = out;
-    struct independent_stats *in_independent_stats = in;
-    threadlocal_stats_aggregate(in_independent_stats->thread_stats,
-                                out_thread_stats);
+    threadlocal_stats_aggregate(in, out);
 }
 
 /* return server specific stats only */
@@ -3692,7 +3680,7 @@ static void server_stats(ADD_STAT add_stats, conn *c, bool aggregate) {
                                             aggregate_callback,
                                             &thread_stats);
     } else {
-        threadlocal_stats_aggregate(get_independent_stats(c)->thread_stats,
+        threadlocal_stats_aggregate(get_thread_stats(c),
                                     &thread_stats);
     }
 
@@ -3855,7 +3843,6 @@ static void process_stat_settings(ADD_STAT add_stats, void *c) {
 #endif
     APPEND_STAT("auth_required_sasl", "%s", settings.require_sasl ? "yes" : "no");
     APPEND_STAT("item_size_max", "%d", settings.item_size_max);
-    APPEND_STAT("topkeys", "%d", settings.topkeys);
 
     for (EXTENSION_DAEMON_DESCRIPTOR *ptr = settings.extensions.daemons;
          ptr != NULL;
@@ -3937,14 +3924,6 @@ static char *process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         return NULL;
     } else if (strcmp(subcommand, "aggregate") == 0) {
         server_stats(&append_stats, c, true);
-    } else if (strcmp(subcommand, "topkeys") == 0) {
-        topkeys_t *tk = get_independent_stats(c)->topkeys;
-        if (tk != NULL) {
-            topkeys_stats(tk, c, current_time, append_stats);
-        } else {
-            out_string(c, "ERROR");
-            return NULL;
-        }
     } else {
         /* getting here means that the subcommand is either engine specific or
            is invalid. query the engine and see. */
@@ -4241,6 +4220,12 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
 
     /* Ubuntu 8.04 breaks when I pass exptime to safe_strtol */
     exptime = exptime_int;
+
+    /* Negative exptimes can underflow and end up immortal. realtime() will
+       immediately expire values that are greater than REALTIME_MAXDELTA, but less
+       than process_started, so lets aim for that. */
+    if (exptime < 0)
+        exptime = REALTIME_MAXDELTA + 1;
 
     // does cas value exist?
     if (handle_cas) {
@@ -4867,7 +4852,7 @@ static enum try_read_result try_read_udp(conn *c) {
         res -= 8;
         memmove(c->rbuf, c->rbuf + 8, res);
 
-        c->rbytes += res;
+        c->rbytes = res;
         c->rcurr = c->rbuf;
         return READ_DATA_RECEIVED;
     }
@@ -6032,17 +6017,17 @@ static int server_socket_unix(const char *path, int access_mask) {
 
 static struct event clockevent;
 
-/* time-sensitive callers can call it by hand with this, outside the normal ever-1-second timer */
-static void set_current_time(void) {
-    struct timeval timer;
-
-    gettimeofday(&timer, NULL);
-    current_time = (rel_time_t) (timer.tv_sec - process_started);
-}
-
+/* libevent uses a monotonic clock when available for event scheduling. Aside
+ * from jitter, simply ticking our internal timer here is accurate enough.
+ * Note that users who are setting explicit dates for expiration times *must*
+ * ensure their clocks are correct before starting memcached. */
 static void clock_handler(const int fd, const short which, void *arg) {
     struct timeval t = {.tv_sec = 1, .tv_usec = 0};
     static bool initialized = false;
+#if defined(HAVE_CLOCK_GETTIME) && defined(CLOCK_MONOTONIC)
+    static bool monotonic = false;
+    static time_t monotonic_start;
+#endif
 
     if (memcached_shutdown) {
         event_base_loopbreak(main_base);
@@ -6054,13 +6039,35 @@ static void clock_handler(const int fd, const short which, void *arg) {
         evtimer_del(&clockevent);
     } else {
         initialized = true;
+        /* process_started is initialized to time() - 2. We initialize to 1 so
+         * flush_all won't underflow during tests. */
+#if defined(HAVE_CLOCK_GETTIME) && defined(CLOCK_MONOTONIC)
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+            monotonic = true;
+            monotonic_start = ts.tv_sec - 2;
+        }
+#endif
     }
 
     evtimer_set(&clockevent, clock_handler, 0);
     event_base_set(main_base, &clockevent);
     evtimer_add(&clockevent, &t);
 
-    set_current_time();
+#if defined(HAVE_CLOCK_GETTIME) && defined(CLOCK_MONOTONIC)
+    if (monotonic) {
+        struct timespec ts;
+        if (clock_gettime(CLOCK_MONOTONIC, &ts) == -1)
+            return;
+        current_time = (rel_time_t) (ts.tv_sec - monotonic_start);
+        return;
+    }
+#endif
+    {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        current_time = (rel_time_t) (tv.tv_sec - process_started);
+    }
 }
 
 static void usage(void) {
@@ -6122,7 +6129,6 @@ static void usage(void) {
     printf("-e config     Pass config as configuration options to the storage engine\n");
     printf("\nEnvironment variables:\n"
            "MEMCACHED_PORT_FILENAME   File to write port information to\n"
-           "MEMCACHED_TOP_KEYS        Number of top keys to keep track of\n"
            "MEMCACHED_REQS_TAP_EVENT  Similar to -R but for tap_ship_log\n");
 }
 
@@ -6341,48 +6347,46 @@ static ENGINE_ERROR_CODE release_cookie(const void *cookie) {
     return ENGINE_SUCCESS;
 }
 
-static int num_independent_stats(void) {
+static inline int num_thread_stats(void) {
     return settings.num_threads + 1;
 }
 
-static void *new_independent_stats(void) {
-    int ii;
-    int nrecords = num_independent_stats();
-    struct independent_stats *independent_stats = calloc(sizeof(independent_stats) + sizeof(struct thread_stats) * nrecords, 1);
-    if (settings.topkeys > 0)
-        independent_stats->topkeys = topkeys_init(settings.topkeys);
-    for (ii = 0; ii < nrecords; ii++)
-        pthread_mutex_init(&independent_stats->thread_stats[ii].mutex, NULL);
-    return independent_stats;
-}
+static void *new_thread_stats(void) {
+    int nrecords = num_thread_stats();
 
-static void release_independent_stats(void *stats) {
-    int ii;
-    int nrecords = num_independent_stats();
-    struct independent_stats *independent_stats = stats;
-    if (independent_stats->topkeys)
-        topkeys_free(independent_stats->topkeys);
-    for (ii = 0; ii < nrecords; ii++)
-        pthread_mutex_destroy(&independent_stats->thread_stats[ii].mutex);
-    free(independent_stats);
-}
-
-static inline struct independent_stats *get_independent_stats(conn *c) {
-    struct independent_stats *independent_stats;
-    if (settings.engine.v1->get_stats_struct != NULL) {
-        independent_stats = settings.engine.v1->get_stats_struct(settings.engine.v0, (const void *)c);
-        if (independent_stats == NULL)
-            independent_stats = default_independent_stats;
-    } else {
-        independent_stats = default_independent_stats;
+    struct thread_stats *ts = calloc(nrecords, sizeof(*ts));
+    if (ts != NULL) {
+        for (int ii = 0; ii < nrecords; ii++) {
+            pthread_mutex_init(&ts[ii].mutex, NULL);
+        }
     }
-    return independent_stats;
+    return ts;
+}
+
+static void release_thread_stats(void *stats) {
+    struct thread_stats *ts = stats;
+    if (ts != NULL) {
+        int nrecords = num_thread_stats();
+        for (int ii = 0; ii < nrecords; ii++) {
+            pthread_mutex_destroy(&ts[ii].mutex);
+        }
+        free(ts);
+    }
 }
 
 static inline struct thread_stats *get_thread_stats(conn *c) {
-    struct independent_stats *independent_stats = get_independent_stats(c);
-    assert(c->thread->index < num_independent_stats());
-    return &independent_stats->thread_stats[c->thread->index];
+    struct thread_stats *ts;
+    if (settings.engine.v1->get_stats_struct != NULL) {
+        ts = settings.engine.v1->get_stats_struct(settings.engine.v0, c);
+        if (ts == NULL) {
+            ts = default_thread_stats;
+        }
+    } else {
+        ts = default_thread_stats;
+    }
+
+    assert(c->thread->index < num_thread_stats());
+    return &ts[c->thread->index];
 }
 
 static void register_callback(ENGINE_HANDLE *eh,
@@ -6404,8 +6408,9 @@ static rel_time_t get_current_time(void)
 }
 
 static void count_eviction(const void *cookie, const void *key, const int nkey) {
-    topkeys_t *tk = get_independent_stats((conn*)cookie)->topkeys;
-    TK(tk, evictions, key, nkey, get_current_time());
+    (void)cookie;
+    (void)key;
+    (void)nkey;
 }
 
 /**
@@ -6782,8 +6787,8 @@ static SERVER_HANDLE_V1 *get_server_api(void)
     };
 
     static SERVER_STAT_API server_stat_api = {
-        .new_stats = new_independent_stats,
-        .release_stats = release_independent_stats,
+        .new_stats = new_thread_stats,
+        .release_stats = release_thread_stats,
         .evicting = count_eviction
     };
 
@@ -6925,7 +6930,7 @@ int main (int argc, char **argv) {
        like 'settings.oldest_live' which act as booleans as well as
        values are now false in boolean context... */
     process_started = time(0) - 2;
-    set_current_time();
+    current_time = process_started;
 
     /* Initialize the socket subsystem */
     initialize_sockets();
@@ -7229,14 +7234,6 @@ int main (int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    char *topkeys_env = getenv("MEMCACHED_TOP_KEYS");
-    if (topkeys_env != NULL) {
-        settings.topkeys = atoi(topkeys_env);
-        if (settings.topkeys < 0) {
-            settings.topkeys = 0;
-        }
-    }
-
     if (settings.require_sasl) {
         if (!protocol_specified) {
             settings.binding_protocol = binary_prot;
@@ -7437,7 +7434,7 @@ int main (int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    default_independent_stats = new_independent_stats();
+    default_thread_stats = new_thread_stats();
 
 #ifndef __WIN32__
     /*
@@ -7469,8 +7466,6 @@ int main (int argc, char **argv) {
 
     /* create the listening socket, bind it, and init */
     if (settings.socketpath == NULL) {
-        int udp_port;
-
         const char *portnumber_filename = getenv("MEMCACHED_PORT_FILENAME");
         char temp_portnumber_filename[PATH_MAX];
         FILE *portnumber_file = NULL;
@@ -7502,10 +7497,9 @@ int main (int argc, char **argv) {
          * then daemonise if needed, then init libevent (in some cases
          * descriptors created by libevent wouldn't survive forking).
          */
-        udp_port = settings.udpport ? settings.udpport : settings.port;
 
         /* create the UDP listening socket and bind it */
-        if (settings.udpport && server_sockets(udp_port, udp_transport,
+        if (settings.udpport && server_sockets(settings.udpport, udp_transport,
                                                portnumber_file)) {
             settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
                                             "failed to listen on UDP port %d: %s",
