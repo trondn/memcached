@@ -152,3 +152,10 @@ uint64_t htonll(uint64_t val) {
 }
 #endif
 
+uint64_t memcached_ntohll(uint64_t val) {
+   return ntohll(val);
+}
+
+uint64_t memcached_htonll(uint64_t val) {
+   return htonll(val);
+}

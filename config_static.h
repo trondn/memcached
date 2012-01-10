@@ -129,4 +129,9 @@ extern void initialize_sockets(void);
 #define SASL_ENABLED
 #endif
 
+#ifndef HAVE_HTONLL
+extern uint64_t ntohll(uint64_t val);
+extern uint64_t htonll(uint64_t val);
+#endif
+
 #endif
