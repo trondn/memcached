@@ -5,6 +5,7 @@ man_MANS = doc/memcached.1
 bin_PROGRAMS = engine_testapp memcached mcstat
 noinst_PROGRAMS = sizes testapp timedrun
 pkginclude_HEADERS = \
+                     include/memcached/allocator_hooks.h \
                      include/memcached/callback.h \
                      include/memcached/config_parser.h \
                      include/memcached/engine.h \
@@ -20,9 +21,11 @@ pkginclude_HEADERS = \
                      include/memcached/vbucket.h \
                      include/memcached/visibility.h
 
+
 # libmemcached_utilities.la needs to be listed first because some of the
 # other modules depend on it
-pkglib_LTLIBRARIES = libmemcached_utilities.la \
+pkglib_LTLIBRARIES = libmalloc_interposer.la \
+                     libmemcached_utilities.la \
                      ascii_scrub.la \
                      basic_engine_testsuite.la \
                      default_engine.la \
@@ -94,12 +97,21 @@ memcached_SOURCES = \
                     daemon/stats.c \
                     daemon/stats.h \
                     daemon/thread.c \
+                    daemon/mem_hooks.c \
+                    daemon/mem_hooks.h \
                     trace.h
 memcached_CPPFLAGS = $(CPPFLAGS) -I$(top_srcdir)/daemon
 memcached_LDFLAGS =-R '$(pkglibdir)' -R '$(libdir)'
 memcached_CFLAGS = @PROFILER_FLAGS@
 memcached_DEPENDENCIES = libmemcached_utilities.la
-memcached_LDADD = @PROFILER_LDFLAGS@ libmemcached_utilities.la -levent $(APPLICATION_LIBS)
+memcached_LDADD = @PROFILER_LDFLAGS@ $(MALLOC_LIBS) libmemcached_utilities.la -levent $(APPLICATION_LIBS)
+
+libmalloc_interposer_la_CPPFLAGS = $(CPPFLAGS)
+libmalloc_interposer_la_LDFLAGS =-R '$(pkglibdir)' -R '$(libdir)'
+libmalloc_interposer_la_SOURCES = \
+                    memory/malloc/malloc_interposer.h \
+                    memory/malloc/malloc_interposer.c
+
 
 if EMBEDDED_LIBEVENT
 libevent.stamp:
