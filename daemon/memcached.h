@@ -445,6 +445,7 @@ bool set_socket_nonblocking(SOCKET sfd);
 
 void conn_close(conn *c);
 
+extern void dump_memory_info(void);
 
 #if HAVE_DROP_PRIVILEGES
 extern void drop_privileges(void);

@@ -2143,6 +2143,8 @@ static void process_bin_stat(conn *c) {
             settings.engine.v1->reset_stats(settings.engine.v0, c);
         } else if (strncmp(subcommand, "settings", 8) == 0) {
             process_stat_settings(&append_stats, c);
+        } else if (strncmp(subcommand, "memory", 6) == 0) {
+            dump_memory_info();
         } else if (strncmp(subcommand, "detail", 6) == 0) {
             char *subcmd_pos = subcommand + 6;
             if (settings.allow_detailed) {
@@ -4138,6 +4140,8 @@ static char *process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         return NULL;
     } else if (strcmp(subcommand, "settings") == 0) {
         process_stat_settings(&append_stats, c);
+    } else if (strncmp(subcommand, "memory", 6) == 0) {
+        dump_memory_info();
     } else if (strcmp(subcommand, "cachedump") == 0) {
         char *buf = NULL;
         unsigned int bytes = 0, id, limit = 0;

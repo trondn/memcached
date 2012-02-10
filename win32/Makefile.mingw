@@ -61,6 +61,7 @@ MEMCACHED_SRC = \
 	      daemon/hash.c \
 	      daemon/isasl.c \
 	      daemon/memcached.c \
+              daemon/memory.c \
 	      daemon/sasl_defs.c \
 	      daemon/stats.c \
 	      daemon/thread.c \
