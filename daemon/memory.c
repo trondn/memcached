@@ -11,6 +11,10 @@
 #include "config.h"
 #include "memcached.h"
 
+#ifdef HAVE_GPERFTOOLS_TCMALLOC_H
+#include <gperftools/tcmalloc.h>
+#endif
+
 #ifdef WIN32
 
 #include <windows.h>
@@ -81,6 +85,11 @@ static void dump_heaps(FILE *fp) {
 
 void dump_memory_info(void)
 {
+#ifdef HAVE_GPERFTOOLS_TCMALLOC_H
+    tc_malloc_stats();
+#endif
+
+
     time_t now = time(NULL);
     char name[1024];
     sprintf(name, "c:\\temp\\memcached-memory-dump-%d.txt", now);
@@ -121,6 +130,9 @@ void dump_memory_info(void)
 
 void dump_memory_info(void)
 {
+#ifdef HAVE_GPERFTOOLS_TCMALLOC_H
+    tc_malloc_stats();
+#endif
     /* Do nothing */
 }
 #endif

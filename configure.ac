@@ -108,7 +108,7 @@ unsigned long val = SASL_CB_GETCONF;
                      [Set to nonzero if your SASL implementation supports SASL_CB_GETCONF])])
 ])
 
-AC_CHECK_HEADERS_ONCE(link.h dlfcn.h inttypes.h umem.h priv.h sasl/sasl.h sysexits.h sys/wait.h sys/socket.h netinet/in.h netdb.h unistd.h sys/un.h sys/stat.h sys/resource.h sys/uio.h netinet/tcp.h pwd.h sys/mman.h syslog.h windows.h)
+AC_CHECK_HEADERS_ONCE(link.h dlfcn.h inttypes.h umem.h priv.h sasl/sasl.h sysexits.h sys/wait.h sys/socket.h netinet/in.h netdb.h unistd.h sys/un.h sys/stat.h sys/resource.h sys/uio.h netinet/tcp.h pwd.h sys/mman.h syslog.h windows.h gperftools/tcmalloc.h)
 
 AM_CONDITIONAL(BUILD_SYSLOG_LOGGER, test "x$ac_cv_header_syslog_h" = "xyes")
 AM_CONDITIONAL(BUILD_EVENTLOG_LOGGER, test "x$ac_cv_header_windows_h" = "xyes")
@@ -304,7 +304,8 @@ AC_CHECK_LIBRARY(umem_cache_create, umem)
 AC_CHECK_LIBRARY(gethugepagesizes, hugetlbfs)
 AC_CHECK_LIBRARY(dlopen, dl)
 AC_CHECK_LIBRARY(log, m)
-APPLICATION_LIBS="$LIBSOCKET $LIBNSL $LIBUMEM $LIBHUGETLBFS $LIBDL $LIBM"
+AC_CHECK_LIBRARY(tc_malloc_stats, tcmalloc_minimal)
+APPLICATION_LIBS="$LIBSOCKET $LIBNSL $LIBUMEM $LIBHUGETLBFS $LIBDL $LIBM $LIBTCMALLOC_MINIMAL"
 AC_SUBST(APPLICATION_LIBS)
 
 AC_HEADER_STDBOOL
