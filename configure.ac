@@ -178,6 +178,16 @@ AS_IF([test "$enable_default_engine" = "yes" -a "$enable_arc_engine" = "yes"],
 
 Please note that you may use -E to load the engines you want.]))
 
+default_engine='"default_engine.so"'
+AC_ARG_WITH(default,
+ [AS_HELP_STRING([--with-default], [Use the following engine as default])],
+ [ AS_IF([test "x$withval" = "xarc"],
+          default_engine='"arc_engine.so"',
+          AC_ERROR([You may (currently) only specify "arc" as the default engine]))
+ ])
+
+AC_DEFINE_UNQUOTED([DEFAULT_ENGINE], [$default_engine], [The name of the engine to load by default])
+
 AC_ARG_ENABLE(dtrace,
   [AS_HELP_STRING([--enable-dtrace],[Enable dtrace probes])])
 if test "x$enable_dtrace" = "xyes"; then
