@@ -317,13 +317,31 @@ MOSTLYCLEANFILES = *.gcov *.gcno *.gcda *.tcov
 
 TEST_TIMEOUT=30
 
-breakdancer_engine: engine_testapp breakdancer_testsuite.la
+breakdancer_default_engine: engine_testapp \
+                            breakdancer_testsuite.la \
+                            default_engine.la
 	./engine_testapp -. -q -E .libs/default_engine.so -t $(TEST_TIMEOUT) \
 		-T .libs/breakdancer_testsuite.so
 
-test_engine: engine_testapp basic_engine_testsuite.la
+breakdancer_arc_engine: engine_testapp \
+                        breakdancer_testsuite.la \
+                        arc_engine.la
+	./engine_testapp -. -q -E .libs/arc_engine.so -t $(TEST_TIMEOUT) \
+		-T .libs/breakdancer_testsuite.so
+
+breakdancer_engine: breakdancer_default_engine \
+                    breakdancer_arc_engine
+
+test_default_engine: engine_testapp basic_engine_testsuite.la default_engine.la
 	./engine_testapp -E .libs/default_engine.so -t $(TEST_TIMEOUT) \
 		-T .libs/basic_engine_testsuite.so
+
+test_arc_engine: engine_testapp basic_engine_testsuite.la default_engine.la
+	./engine_testapp -E .libs/arc_engine.so -t $(TEST_TIMEOUT) \
+		-T .libs/basic_engine_testsuite.so
+
+test_engine: test_default_engine \
+             test_arc_engine
 
 test: $(bin_PROGRAMS) $(noinst_PROGRAMS) $(pkglib_LTLIBRARIES) $(ENGINE_TESTS)
 	./sizes
