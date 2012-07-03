@@ -1,10 +1,12 @@
 # Please list files alphabetically in the lists to reduce the risk for
 # a merge conflict.
 #
+ACLOCAL_AMFLAGS = -I m4 --force
 man_MANS = doc/memcached.1
-bin_PROGRAMS = engine_testapp memcached mcstat
+bin_PROGRAMS = engine_testapp memcached mcstat mcbasher
 noinst_PROGRAMS = sizes testapp timedrun
 pkginclude_HEADERS = \
+                     include/memcached/allocator_hooks.h \
                      include/memcached/callback.h \
                      include/memcached/config_parser.h \
                      include/memcached/engine.h \
@@ -27,9 +29,11 @@ pkglib_LTLIBRARIES = libmemcached_utilities.la \
                      basic_engine_testsuite.la \
                      default_engine.la \
                      example_protocol.la \
+                     file_logger.la \
                      fragment_rw_ops.la \
                      blackhole_logger.la \
-                     stdin_term_handler.la
+                     stdin_term_handler.la \
+                     tap_mock_engine.la
 
 if BUILD_SYSLOG_LOGGER
 pkglib_LTLIBRARIES += syslog_logger.la
@@ -54,6 +58,8 @@ testapp_LDADD= libmemcached_utilities.la $(APPLICATION_LIBS)
 mcstat_SOURCES = programs/mcstat.c
 mcstat_LDADD = $(APPLICATION_LIBS)
 
+mcbasher_SOURCES = programs/mcbasher.cc
+mcbasher_LDADD = $(APPLICATION_LIBS)
 
 # New and fancy test program to test engines without the need to run
 # everything through the network layer
@@ -62,6 +68,7 @@ engine_testapp_SOURCES = \
                         programs/engine_testapp.c \
                         programs/mock_server.c \
                         programs/mock_server.h \
+                        include/memcached/allocator_hooks.h \
                         include/memcached/engine_testapp.h
 engine_testapp_DEPENDENCIES= libmemcached_utilities.la
 engine_testapp_LDADD= libmemcached_utilities.la $(APPLICATION_LIBS)
@@ -94,12 +101,14 @@ memcached_SOURCES = \
                     daemon/stats.c \
                     daemon/stats.h \
                     daemon/thread.c \
+                    daemon/alloc_hooks.c \
+                    daemon/alloc_hooks.h \
                     trace.h
 memcached_CPPFLAGS = $(CPPFLAGS) -I$(top_srcdir)/daemon
 memcached_LDFLAGS =-R '$(pkglibdir)' -R '$(libdir)'
 memcached_CFLAGS = @PROFILER_FLAGS@
 memcached_DEPENDENCIES = libmemcached_utilities.la
-memcached_LDADD = @PROFILER_LDFLAGS@ libmemcached_utilities.la -levent $(APPLICATION_LIBS)
+memcached_LDADD = @PROFILER_LDFLAGS@ $(MALLOC_LIBS) libmemcached_utilities.la -levent $(APPLICATION_LIBS)
 
 if EMBEDDED_LIBEVENT
 libevent.stamp:
@@ -124,7 +133,12 @@ endif
 
 if ENABLE_ISASL
 memcached_SOURCES += daemon/sasl_defs.c daemon/isasl.c daemon/isasl.h
+bin_PROGRAMS += isasladm
 endif
+
+isasladm_SOURCES = programs/isasladm.c
+isasladm_LDADD = $(APPLICATION_LIBS)
+
 
 if INCLUDE_DEFAULT_ENGINE
 memcached_SOURCES += $(default_engine_la_SOURCES)
@@ -149,6 +163,15 @@ default_engine_la_DEPENDENCIES= libmemcached_utilities.la
 default_engine_la_LIBADD= libmemcached_utilities.la $(LIBM)
 default_engine_la_LDFLAGS= -avoid-version -shared -module -no-undefined
 
+# A mock engine I may use to test tap
+tap_mock_engine_la_SOURCES = engines/tap_mock_engine/tap_mock_engine.cc \
+                             engines/tap_mock_engine/tap_mock_engine.h
+
+tap_mock_engine_la_CPPFLAGS = $(CPPFLAGS) -I$(top_srcdir)/engines/tap_mock_engine
+tap_mock_engine_la_DEPENDENCIES= libmemcached_utilities.la
+tap_mock_engine_la_LIBADD= libmemcached_utilities.la $(LIBM)
+tap_mock_engine_la_LDFLAGS= -avoid-version -shared -module -no-undefined
+
 if BUILD_DTRACE
 BUILT_SOURCES += memcached_dtrace.h
 CLEANFILES += memcached_dtrace.h
@@ -171,7 +194,8 @@ ascii_scrub_la_LDFLAGS= -avoid-version -shared -module -no-undefined
 
 # An extension that supports partital read/write operation
 fragment_rw_ops_la_CPPFLAGS = $(CPPFLAGS) -I$(top_srcdir)/extensions
-fragment_rw_ops_la_SOURCES = extensions/protocol/fragment_rw.c
+fragment_rw_ops_la_SOURCES = extensions/protocol/fragment_rw.c \
+                             extensions/protocol/fragment_rw.h
 fragment_rw_ops_la_LDFLAGS = -avoid-version -shared -module -no-undefined
 fragment_rw_ops_la_LIBADD = libmemcached_utilities.la $(LIBM)
 fragment_rw_ops_la_DEPENDENCIES = libmemcached_utilities.la
@@ -206,6 +230,12 @@ eventlog_logger_la_SOURCES = extensions/loggers/eventlog_logger.c \
                              extensions/protocol_extension.h
 eventlog_logger_la_LDFLAGS = -avoid-version -shared -module -no-undefined
 
+# The file-based logger doing compression
+file_logger_la_CPPFLAGS = $(CPPFLAGS) -I$(top_srcdir)/extensions
+file_logger_la_SOURCES = extensions/loggers/file_logger.c \
+                         extensions/protocol_extension.h
+file_logger_la_LDFLAGS = -avoid-version -shared -module -no-undefined
+file_logger_la_LIBADD = $(LIBZ)
 
 basic_engine_testsuite_la_SOURCES= testsuite/basic_engine_testsuite.c \
                                    testsuite/basic_engine_testsuite.h
@@ -250,7 +280,7 @@ default_engine_dtrace.lo: $(default_engine_la_OBJECTS)
 	sed -e s,assoc,default_engine_dtrace,g default_engine_la-assoc.lo > default_engine_dtrace.lo
 
 DIST_DIRS = scripts
-EXTRA_DIST = doc scripts t memcached.spec memcached_dtrace.d m4/version.m4 \
+EXTRA_DIST = doc scripts t memcached_dtrace.d m4/version.m4 \
              testsuite/breakdancer/engine_test.py testsuite/breakdancer/breakdancer.py \
              LICENSE CONTRIBUTING HACKING win32
 

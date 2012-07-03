@@ -15,8 +15,20 @@ LOCALINC=-I${LOCAL}/include
 DEST=${LOCAL}
 INSTALLDIRS=${DEST}/bin ${DEST}/lib ${DEST}/include/memcached
 
+TCMALLOC_FLAGS = -Wwrite-strings \
+                    -Wno-sign-compare -DNO_FRAME_POINTER \
+                    -DHAVE_LIBTCMALLOC_MINIMAL \
+                    -fno-builtin-malloc -fno-builtin-free -fno-builtin-realloc \
+                    -fno-builtin-calloc -fno-builtin-cfree \
+                    -fno-builtin-memalign -fno-builtin-posix_memalign \
+                    -fno-builtin-valloc -fno-builtin-pvalloc
+
+TCMALLOC_LIB_FLAGS = -Wl,-u__tcmalloc \
+                 -ltcmalloc_minimal.dll -lPsapi -lshlwapi \
+                 -lstdc++.dll
+
 OBJDIR = .libs \
-	 .libs/engines \
+         .libs/engines \
          .libs/daemon \
          .libs/engines/default_engine \
          .libs/extensions/daemon \
@@ -30,12 +42,13 @@ OBJDIR = .libs \
 BINARIES= mcstat.exe \
           memcached.exe \
           engine_testapp.exe \
-	  sizes.exe \
-	  .libs/ascii_scrub.so \
+          sizes.exe \
+          .libs/ascii_scrub.so \
           .libs/basic_engine_testsuite.so \
           .libs/default_engine.so \
           .libs/example_protocol.so \
           .libs/eventlog_logger.so \
+          .libs/file_logger.so \
           .libs/stdin_term_handler.so
 
 LIB=${LOCALLIB}
@@ -51,12 +64,14 @@ install: ${BINARIES} ${INSTALLDIRS}
 CFLAGS = -std=gnu99 -O2 -g -DNDEBUG -fno-strict-aliasing -Wall \
  -Wstrict-prototypes -Wmissing-prototypes -Wmissing-declarations \
  -Wredundant-decls \
+ $(TCMALLOC_FLAGS) \
  ${INCLUDE} -DHAVE_CONFIG_H
 
 MCSTAT_SRC = programs/mcstat.c win32/win32.c
 MCSTAT_OBJS = ${MCSTAT_SRC:%.c=.libs/%.o}
 
 MEMCACHED_SRC = \
+	      daemon/alloc_hooks.c \
 	      daemon/cache.c \
 	      daemon/hash.c \
 	      daemon/isasl.c \
@@ -106,6 +121,9 @@ STDIN_TERM_HANDLER_OBJS = ${STDIN_TERM_HANDLER_SRC:%.c=.libs/%.o}
 EVENTLOG_LOGGER_SRC = extensions/loggers/eventlog_logger.c
 EVENTLOG_LOGGER_OBJS = ${EVENTLOG_LOGGER_SRC:%.c=.libs/%.o}
 
+FILE_LOGGER_SRC = extensions/loggers/file_logger.c
+FILE_LOGGER_OBJS = ${FILE_LOGGER_SRC:%.c=.libs/%.o}
+
 BASIC_ENGINE_TESTSUITE_SRC = testsuite/basic_engine_testsuite.c
 BASIC_ENGINE_TESTSUITE_OBJS = ${BASIC_ENGINE_TESTSUITE_SRC:%.c=.libs/%.o}
 
@@ -113,15 +131,18 @@ GENFILES=.libs/config_version.h
 
 mcstat.exe: ${OBJDIR} ${GENFILES} $(MCSTAT_OBJS)
 	${LINK.c} -o $@ $(MCSTAT_OBJS) \
+                  $(TCMALLOC_LIB_FLAGS) \
                   ${LIB} -lmswsock -lws2_32
 
 memcached.exe: ${OBJDIR} ${GENFILES} $(MEMCACHED_OBJS)
 	${LINK.c} -o $@ $(MEMCACHED_OBJS) \
+                  $(TCMALLOC_LIB_FLAGS) \
                   ${LIB} -levent -lmswsock \
                   -lws2_32 -lpthread
 
 engine_testapp.exe: ${OBJDIR} ${GENFILES} $(ENGINE_TESTAPP_OBJS)
 	${LINK.c} -o $@ $(ENGINE_TESTAPP_OBJS) \
+                 $(TCMALLOC_LIB_FLAGS) \
                   ${LIB} -levent -lmswsock \
                   -lws2_32 -lpthread
 
@@ -145,6 +166,10 @@ sizes.exe: ${OBJDIR} ${GENFILES} $(SIZES_OBJS)
 .libs/eventlog_logger.so: ${OBJDIR} $(EVENTLOG_LOGGER_OBJS)
 	${LINK.c} -o $@ -shared ${EVENTLOG_LOGGER_OBJS} ${LIBS} \
                   ${LIB}
+
+.libs/file_logger.so: ${OBJDIR} $(FILE_LOGGER_OBJS)
+	${LINK.c} -o $@ -shared ${FILE_LOGGER_OBJS} ${LIBS} \
+                  ${LIB} -lpthread
 
 .libs/basic_engine_testsuite.so: ${OBJDIR} $(BASIC_ENGINE_TESTSUITE_OBJS)
 	${LINK.c} -o $@ -shared ${BASIC_ENGINE_TESTSUITE_OBJS} ${LIB} -lpthread -lws2_32
@@ -178,6 +203,8 @@ clean:
               ${SIZES_OBJS} \
               ${EVENTLOG_LOGGER_OBJS:.o=.d} \
               ${EVENTLOG_LOGGER_OBJS} \
+              ${FILE_LOGGER_OBJS:.o=.d} \
+              ${FILE_LOGGER_OBJS} \
               ${STDIN_TERM_HANDLER_OBJS:.o=.d} \
               ${STDIN_TERM_HANDLER_OBJS}
 
@@ -190,4 +217,5 @@ clean:
          ${MCSTAT_OBJS:.o=.d} \
          ${SIZES_OBJS:.o=.d} \
          ${EVENTLOG_LOGGER_OBJS:.o=.d} \
+         ${FILE_LOGGER_OBJS:.o=.d} \
          ${STDIN_TERM_HANDLER_OBJS:.o=.d}

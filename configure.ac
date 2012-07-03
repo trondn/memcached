@@ -8,8 +8,10 @@ AC_CANONICAL_SYSTEM
 AC_CONFIG_SRCDIR(Makefile.am)
 AM_INIT_AUTOMAKE(AC_PACKAGE_NAME, AC_PACKAGE_VERSION)
 AM_CONFIG_HEADER(config.h)
+AC_CONFIG_MACRO_DIR([m4])
 
 AC_PROG_CC
+AC_PROG_CXX
 AC_DISABLE_STATIC
 AC_PROG_LIBTOOL
 
@@ -56,9 +58,14 @@ AC_DEFUN([DETECT_SUNCC],
 ])
 
 AS_IF(test "x$GCC" = "xyes",
-      DETECT_ICC([CFLAGS="-pthread $CFLAGS"], [CFLAGS="-fvisibility=hidden -pthread $CFLAGS"]),
+      DETECT_ICC([CPPFLAGS="-pthread $CPPFLAGS"],
+          [CPPFLAGS="-fvisibility=hidden -pthread $CPPFLAGS"
+           LDFLAGS="-pthread $LDFLAGS"
+          ]),
       ICC=no
-      DETECT_SUNCC([CFLAGS="-xldscope=hidden -mt -xc99=all $CFLAGS"], []))
+      DETECT_SUNCC([CPPFLAGS="-xldscope=hidden -mt $CPPFLAGS"
+                    CXXFLAGS="-xlang=c99 $CXXFLAGS"
+                    CFLAGS="-xc99=all $CFLAGS"], []))
 
 if test "$ICC" = "no"; then
    AC_PROG_CC_C99
@@ -108,7 +115,7 @@ unsigned long val = SASL_CB_GETCONF;
                      [Set to nonzero if your SASL implementation supports SASL_CB_GETCONF])])
 ])
 
-AC_CHECK_HEADERS_ONCE(link.h dlfcn.h inttypes.h umem.h priv.h sasl/sasl.h sysexits.h sys/wait.h sys/socket.h netinet/in.h netdb.h unistd.h sys/un.h sys/stat.h sys/resource.h sys/uio.h netinet/tcp.h pwd.h sys/mman.h syslog.h windows.h)
+AC_CHECK_HEADERS_ONCE(link.h dlfcn.h inttypes.h umem.h priv.h sasl/sasl.h sysexits.h sys/wait.h sys/socket.h netinet/in.h netdb.h unistd.h sys/un.h sys/stat.h sys/resource.h sys/uio.h netinet/tcp.h pwd.h sys/mman.h syslog.h windows.h zlib.h)
 
 AM_CONDITIONAL(BUILD_SYSLOG_LOGGER, test "x$ac_cv_header_syslog_h" = "xyes")
 AM_CONDITIONAL(BUILD_EVENTLOG_LOGGER, test "x$ac_cv_header_windows_h" = "xyes")
@@ -247,6 +254,7 @@ return sizeof(void*) == 8 ? 0 : 1;
       ])
     ],[
       CFLAGS="-m64 $org_cflags"
+      CXXFLAGS="-m64 $CXXFLAGS"
     ],[
     AC_MSG_ERROR([Don't know how to build a 64-bit object.])
     ])
@@ -310,6 +318,7 @@ AC_CHECK_LIBRARY(dlopen, dl)
 AC_CHECK_LIBRARY(log, m)
 APPLICATION_LIBS="$LIBUMEM $LIBHUGETLBFS $LIBDL $LIBM"
 AC_SUBST(APPLICATION_LIBS)
+AC_CHECK_LIBRARY(deflate, z)
 
 AC_HEADER_STDBOOL
 AH_TOP([#ifndef CONFIG_H
@@ -512,6 +521,8 @@ AC_ARG_ENABLE([breakdancer],
 
 AM_CONDITIONAL(ENABLE_BREAKDANCE,
                test "x$ac_cv_enable_breakdancer" = "xyes" -a "x$PYTHON" != "xno")
+
+MALLOC_MACROS
 
 dnl Generate output files
 CPPFLAGS="-I\${top_srcdir}/include ${CPPFLAGS}"

@@ -579,6 +579,7 @@ static char* trim(char* ptr) {
 static enum test_return test_config_parser(void) {
     bool bool_val = false;
     size_t size_val = 0;
+    ssize_t ssize_val = 0;
     float float_val = 0;
     char *string_val = 0;
 
@@ -590,6 +591,9 @@ static enum test_return test_config_parser(void) {
         { .key = "size_t",
           .datatype = DT_SIZE,
           .value.dt_size = &size_val },
+        { .key = "ssize_t",
+          .datatype = DT_SSIZE,
+          .value.dt_ssize = &ssize_val },
         { .key = "float",
           .datatype = DT_FLOAT,
           .value.dt_float = &float_val},
@@ -640,45 +644,45 @@ static enum test_return test_config_parser(void) {
     /* Empty string */
     /* XXX:  This test fails on Linux, but works on OS X.
     assert(parse_config("string=", items, error) == 0);
-    assert(items[3].found);
+    assert(items[4].found);
     assert(strcmp(string_val, "") == 0);
-    items[3].found = false;
+    items[4].found = false;
     */
     /* Plain string */
     assert(parse_config("string=sval", items, error) == 0);
-    assert(items[3].found);
+    assert(items[4].found);
     assert(strcmp(string_val, "sval") == 0);
-    items[3].found = false;
+    items[4].found = false;
     /* Leading space */
     assert(parse_config("string= sval", items, error) == 0);
-    assert(items[3].found);
+    assert(items[4].found);
     assert(strcmp(string_val, "sval") == 0);
-    items[3].found = false;
+    items[4].found = false;
     /* Escaped leading space */
     assert(parse_config("string=\\ sval", items, error) == 0);
-    assert(items[3].found);
+    assert(items[4].found);
     assert(strcmp(string_val, " sval") == 0);
-    items[3].found = false;
+    items[4].found = false;
     /* trailing space */
     assert(parse_config("string=sval ", items, error) == 0);
-    assert(items[3].found);
+    assert(items[4].found);
     assert(strcmp(string_val, "sval") == 0);
-    items[3].found = false;
+    items[4].found = false;
     /* escaped trailing space */
     assert(parse_config("string=sval\\ ", items, error) == 0);
-    assert(items[3].found);
+    assert(items[4].found);
     assert(strcmp(string_val, "sval ") == 0);
-    items[3].found = false;
+    items[4].found = false;
     /* escaped stop char */
     assert(parse_config("string=sval\\;blah=x", items, error) == 0);
-    assert(items[3].found);
+    assert(items[4].found);
     assert(strcmp(string_val, "sval;blah=x") == 0);
-    items[3].found = false;
+    items[4].found = false;
     /* middle space */
     assert(parse_config("string=s val", items, error) == 0);
-    assert(items[3].found);
+    assert(items[4].found);
     assert(strcmp(string_val, "s val") == 0);
-    items[3].found = false;
+    items[4].found = false;
 
     /* And all of the variables */
     assert(parse_config("bool=true;size_t=1024;float=12.5;string=somestr",
@@ -1087,8 +1091,8 @@ static off_t arithmetic_command(char* buf,
     request->message.header.request.extlen = 20;
     request->message.header.request.bodylen = htonl(keylen + 20);
     request->message.header.request.opaque = 0xdeadbeef;
-    request->message.body.delta = htonll(delta);
-    request->message.body.initial = htonll(initial);
+    request->message.body.delta = memcached_htonll(delta);
+    request->message.body.initial = memcached_htonll(initial);
     request->message.body.expiration = htonl(exp);
 
     off_t key_offset = sizeof(protocol_binary_request_no_extras) + 20;
@@ -1324,6 +1328,13 @@ static enum test_return test_binary_add_impl(const char *key, uint8_t cmd) {
         }
     }
 
+    // And verify that it doesn't work with the "correct" CAS
+    // value
+    send.request.message.header.request.cas = receive.response.message.header.response.cas;
+    safe_send(send.bytes, len, false);
+    safe_recv_packet(receive.bytes, sizeof(receive.bytes));
+    validate_response_header(&receive.response, cmd,
+                             PROTOCOL_BINARY_RESPONSE_KEY_EEXISTS);
     return TEST_PASS;
 }
 
@@ -1552,7 +1563,7 @@ static enum test_return test_binary_incr_impl(const char* key, uint8_t cmd) {
             safe_recv_packet(receive.bytes, sizeof(receive.bytes));
             validate_response_header(&receive.response_header, cmd,
                                      PROTOCOL_BINARY_RESPONSE_SUCCESS);
-            assert(ntohll(receive.response.message.body.value) == ii);
+            assert(memcached_ntohll(receive.response.message.body.value) == ii);
         }
     }
 
@@ -1589,7 +1600,7 @@ static enum test_return test_binary_decr_impl(const char* key, uint8_t cmd) {
             safe_recv_packet(receive.bytes, sizeof(receive.bytes));
             validate_response_header(&receive.response_header, cmd,
                                      PROTOCOL_BINARY_RESPONSE_SUCCESS);
-            assert(ntohll(receive.response.message.body.value) == ii);
+            assert(memcached_ntohll(receive.response.message.body.value) == ii);
         }
     }
 
@@ -1599,7 +1610,7 @@ static enum test_return test_binary_decr_impl(const char* key, uint8_t cmd) {
         safe_recv_packet(receive.bytes, sizeof(receive.bytes));
         validate_response_header(&receive.response_header, cmd,
                                  PROTOCOL_BINARY_RESPONSE_SUCCESS);
-        assert(ntohll(receive.response.message.body.value) == 0);
+        assert(memcached_ntohll(receive.response.message.body.value) == 0);
     } else {
         test_binary_noop();
     }

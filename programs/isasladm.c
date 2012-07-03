@@ -12,78 +12,13 @@
 static void retry_send(int sock, const void* buf, size_t len);
 static void retry_recv(int sock, void *buf, size_t len);
 
-#if defined(ENABLE_ISASL) || defined(ENABLE_SASL)
-static int do_sasl_auth(int sock, const char *user, const char *pass)
-{
-    /*
-     * For now just shortcut the SASL phase by requesting a "PLAIN"
-     * sasl authentication.
-     */
-    size_t ulen = strlen(user) + 1;
-    size_t plen = pass ? strlen(pass) + 1 : 1;
-    size_t tlen = ulen + plen + 1;
-
-    protocol_binary_request_stats request = {
-        .message.header.request = {
-            .magic = PROTOCOL_BINARY_REQ,
-            .opcode = PROTOCOL_BINARY_CMD_SASL_AUTH,
-            .keylen = htons(5),
-            .bodylen = htonl(5 + tlen)
-        }
-    };
-
-    retry_send(sock, &request, sizeof(request));
-    retry_send(sock, "PLAIN", 5);
-    retry_send(sock, "", 1);
-    retry_send(sock, user, ulen);
-    if (pass) {
-        retry_send(sock, pass, plen);
-    } else {
-        retry_send(sock, "", 1);
-    }
-
-    protocol_binary_response_no_extras response;
-    retry_recv(sock, &response, sizeof(response.bytes));
-    uint32_t vallen = ntohl(response.message.header.response.bodylen);
-    char *buffer = NULL;
-
-    if (vallen != 0) {
-        buffer = malloc(vallen);
-        retry_recv(sock, buffer, vallen);
-    }
-
-    protocol_binary_response_status status;
-    status = ntohs(response.message.header.response.status);
-
-    if (status != PROTOCOL_BINARY_RESPONSE_SUCCESS) {
-        fprintf(stderr, "Failed to authenticate to the server\n");
-        close(sock);
-        sock = -1;
-        return -1;
-    }
-
-    free(buffer);
-    return sock;
-}
-#else
-static int do_sasl_auth(int sock, const char *user, const char *pass)
-{
-    (void)sock; (void)user; (void)pass;
-    fprintf(stderr, "mcstat is not built with sasl support\n");
-    return -1;
-}
-#endif
-
 /**
  * Try to connect to the server
  * @param host the name of the server
  * @param port the port to connect to
- * @param user the username to use for SASL auth (NULL = NO SASL)
- * @param pass the password to use for SASL auth
  * @return a socket descriptor connected to host:port for success, -1 otherwise
  */
-static int connect_server(const char *hostname, const char *port,
-                          const char *user, const char *pass)
+static int connect_server(const char *hostname, const char *port)
 {
     struct addrinfo *ainfo = NULL;
     struct addrinfo hints = {
@@ -115,9 +50,6 @@ static int connect_server(const char *hostname, const char *port,
     if (sock == -1) {
         fprintf(stderr, "Failed to connect to memcached server (%s:%s): %s\n",
                 hostname, port, strerror(errno));
-    } else if (user != NULL && do_sasl_auth(sock, user, pass) == -1) {
-        close(sock);
-        sock = -1;
     }
 
     return sock;
@@ -183,71 +115,31 @@ static void retry_recv(int sock, void *buf, size_t len)
 }
 
 /**
- * Print the key value pair
- * @param key key to print
- * @param keylen length of key to print
- * @param val value to print
- * @param vallen length of value
- */
-static void print(const char *key, int keylen, const char *val, int vallen) {
-    fputs("STAT ", stdout);
-    (void)fwrite(key, keylen, 1, stdout);
-    fputs(" ", stdout);
-    (void)fwrite(val, vallen, 1, stdout);
-    fputs("\n", stdout);
-    fflush(stdout);
-}
-
-/**
- * Request a stat from the server
+ * Refresh the iSASL password database
  * @param sock socket connected to the server
- * @param key the name of the stat to receive (NULL == ALL)
  */
-static void request_stat(int sock, const char *key)
+static void refresh(int sock)
 {
-    uint32_t buffsize = 0;
-    char *buffer = NULL;
-    uint16_t keylen = 0;
-    if (key != NULL) {
-        keylen = (uint16_t)strlen(key);
-    }
-
-    protocol_binary_request_stats request = {
+    protocol_binary_request_no_extras request = {
         .message.header.request = {
             .magic = PROTOCOL_BINARY_REQ,
-            .opcode = PROTOCOL_BINARY_CMD_STAT,
-            .keylen = htons(keylen),
-            .bodylen = htonl(keylen)
+            .opcode = PROTOCOL_BINARY_CMD_ISASL_REFRESH
         }
     };
 
     retry_send(sock, &request, sizeof(request));
-    if (keylen > 0) {
-        retry_send(sock, key, keylen);
-    }
 
     protocol_binary_response_no_extras response;
-    do {
-        retry_recv(sock, &response, sizeof(response.bytes));
-        if (response.message.header.response.keylen != 0) {
-            uint16_t keylen = ntohs(response.message.header.response.keylen);
-            uint32_t vallen = ntohl(response.message.header.response.bodylen);
-            if (vallen > buffsize) {
-                if ((buffer = realloc(buffer, vallen)) == NULL) {
-                    fprintf(stderr, "Failed to allocate memory\n");
-                    exit(1);
-                }
-                buffsize = vallen;
-            }
-            retry_recv(sock, buffer, vallen);
-            print(buffer, keylen, buffer + keylen, vallen - keylen);
-        }
-    } while (response.message.header.response.keylen != 0);
+    retry_recv(sock, &response, sizeof(response.bytes));
+    if (response.message.header.response.status != 0) {
+        uint16_t err = ntohs(response.message.header.response.status);
+        fprintf(stderr, "Failed to refresh isasl passwd db: %d\n",
+                err);
+    }
 }
 
 /**
- * Program entry point. Connect to a memcached server and use the binary
- * protocol to retrieve a given set of stats.
+ * Program entry point.
  *
  * @param argc argument count
  * @param argv argument vector
@@ -259,8 +151,6 @@ int main(int argc, char **argv)
     const char * const default_ports[] = { "memcache", "11211", NULL };
     const char *port = NULL;
     const char *host = NULL;
-    const char *user = NULL;
-    const char *pass = NULL;
     char *ptr;
 
     /* Initialize the socket subsystem */
@@ -279,15 +169,9 @@ int main(int argc, char **argv)
         case 'p':
             port = optarg;
             break;
-        case 'u' :
-            user = optarg;
-            break;
-        case 'P':
-            pass = optarg;
-            break;
         default:
             fprintf(stderr,
-                    "Usage mcstat [-h host[:port]] [-p port] [-u user] [-p pass] [statkey]*\n");
+                    "Usage mcstat [-h host[:port]] [-p port] [cmd]*\n");
             return 1;
         }
     }
@@ -296,26 +180,33 @@ int main(int argc, char **argv)
         host = "localhost";
     }
 
+    if (optind == argc) {
+        fprintf(stderr, "You need to supply a command\n");
+        return EXIT_FAILURE;
+    }
+
     int sock = -1;
     if (port == NULL) {
         int ii = 0;
         do {
             port = default_ports[ii++];
-            sock = connect_server(host, port, user, pass);
+            sock = connect_server(host, port);
         } while (sock == -1 && default_ports[ii] != NULL);
     } else {
-        sock = connect_server(host, port, user, pass);
+        sock = connect_server(host, port);
     }
 
     if (sock == -1) {
         return 1;
     }
 
-    if (optind == argc) {
-        request_stat(sock, NULL);
-    } else {
-        for (int ii = optind; ii < argc; ++ii) {
-            request_stat(sock, argv[ii]);
+    for (int ii = optind; ii < argc; ++ii) {
+        if (strcmp(argv[ii], "refresh") == 0) {
+            refresh(sock);
+        } else {
+            fprintf(stderr, "Unknown command %s\n", argv[ii]);
+            close(sock);
+            return 1;
         }
     }
 
