@@ -1047,7 +1047,7 @@ static ENGINE_ERROR_CODE do_arithmetic(struct arc_engine *engine,
    hash_item *item = do_item_get(engine, key, nkey);
    ENGINE_ERROR_CODE ret;
 
-   if (item->flags & ITEM_BOTTOM) {
+   if (item != NULL && item->flags & ITEM_BOTTOM) {
 	   do_item_unlink(engine, item);
 	   do_item_release(engine, item);
 	   item = NULL;
