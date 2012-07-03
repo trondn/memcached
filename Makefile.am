@@ -28,6 +28,7 @@ pkglib_LTLIBRARIES = libmemcached_utilities.la \
                      ascii_scrub.la \
                      basic_engine_testsuite.la \
                      default_engine.la \
+                     arc_engine.la \
                      example_protocol.la \
                      file_logger.la \
                      fragment_rw_ops.la \
@@ -145,6 +146,11 @@ memcached_SOURCES += $(default_engine_la_SOURCES)
 memcached_LDFLAGS += -export-dynamic
 endif
 
+if INCLUDE_ARC_ENGINE
+memcached_SOURCES += $(arc_engine_la_SOURCES)
+memcached_LDFLAGS += -export-dynamic
+endif
+
 CLEANFILES=
 BUILT_SOURCES=
 
@@ -157,6 +163,16 @@ default_engine_la_SOURCES= engines/default_engine/assoc.c \
                            engines/default_engine/items.h \
                            engines/default_engine/slabs.c \
                            engines/default_engine/slabs.h
+
+# The ARC storage engine
+arc_engine_la_SOURCES = engines/arc_engine/arc_assoc.c \
+                        engines/arc_engine/arc_assoc.h \
+                        engines/arc_engine/arc_engine.c \
+                        engines/arc_engine/arc_engine.h \
+                        engines/arc_engine/arc_items.c \
+                        engines/arc_engine/arc_items.h \
+                        engines/arc_engine/arc_slabs.c \
+                        engines/arc_engine/arc_slabs.h
 
 default_engine_la_CPPFLAGS = $(CPPFLAGS) -I$(top_srcdir)/engines/default_engine
 default_engine_la_DEPENDENCIES= libmemcached_utilities.la
@@ -172,6 +188,11 @@ tap_mock_engine_la_DEPENDENCIES= libmemcached_utilities.la
 tap_mock_engine_la_LIBADD= libmemcached_utilities.la $(LIBM)
 tap_mock_engine_la_LDFLAGS= -avoid-version -shared -module -no-undefined
 
+arc_engine_la_CPPFLAGS = $(CPPFLAGS) -I$(top_srcdir)/engines/arc_engine
+arc_engine_la_DEPENDENCIES= libmemcached_utilities.la
+arc_engine_la_LIBADD= libmemcached_utilities.la $(LIBM)
+arc_engine_la_LDFLAGS= -avoid-version -shared -module -no-undefined
+
 if BUILD_DTRACE
 BUILT_SOURCES += memcached_dtrace.h
 CLEANFILES += memcached_dtrace.h
@@ -180,10 +201,13 @@ endif
 if DTRACE_INSTRUMENT_OBJ
 memcached_LDADD += memcached_dtrace.o
 memcached_DEPENDENCIES += memcached_dtrace.o
-CLEANFILES += memcached_dtrace.o default_engine_dtrace.lo
+CLEANFILES += memcached_dtrace.o default_engine_dtrace.lo arc_engine_dtrace.lo
 
 default_engine_la_LIBADD += default_engine_dtrace.lo
 default_engine_la_DEPENDENCIES += default_engine_dtrace.lo
+
+arc_engine_la_LIBADD += arc_engine_dtrace.lo
+arc_engine_la_DEPENDENCIES += arc_engine_dtrace.lo
 endif
 
 # ASCII support for the scrub command
@@ -278,6 +302,11 @@ DEFAULT_ENGINE_OBJS=$(default_engine_la_OBJECTS:%lo=.libs/%o)
 default_engine_dtrace.lo: $(default_engine_la_OBJECTS)
 	$(DTRACE) $(DTRACEFLAGS) -G -o .libs/default_engine_la-default_engine_dtrace.o -s ${srcdir}/memcached_dtrace.d $(DEFAULT_ENGINE_OBJS)
 	sed -e s,assoc,default_engine_dtrace,g default_engine_la-assoc.lo > default_engine_dtrace.lo
+
+ARC_ENGINE_OBJS=$(arc_engine_la_OBJECTS:%lo=.libs/%o)
+arc_engine_dtrace.lo: $(arc_engine_la_OBJECTS)
+	$(DTRACE) $(DTRACEFLAGS) -G -o .libs/arc_engine_la-arc_engine_dtrace.o -s ${srcdir}/memcached_dtrace.d $(ARC_ENGINE_OBJS)
+	sed -e s,arc_assoc,arc_engine_dtrace,g arc_engine_la-arc_assoc.lo > arc_engine_dtrace.lo
 
 DIST_DIRS = scripts
 EXTRA_DIST = doc scripts t memcached_dtrace.d m4/version.m4 \

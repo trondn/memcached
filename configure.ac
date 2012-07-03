@@ -169,6 +169,14 @@ AC_CONFIG_FILES(t/binary-sasl.t)
 AC_ARG_ENABLE(default-engine,
   [AS_HELP_STRING([--enable-default-engine], [Build-in default engine])])
 AM_CONDITIONAL([INCLUDE_DEFAULT_ENGINE],[test "$enable_default_engine" = "yes"])
+AC_ARG_ENABLE(arc-engine,
+  [AS_HELP_STRING([--enable-arc-engine], [Build-in arc engine])])
+AM_CONDITIONAL([INCLUDE_ARC_ENGINE],[test "$enable_arc_engine" = "yes"])
+
+AS_IF([test "$enable_default_engine" = "yes" -a "$enable_arc_engine" = "yes"],
+      AC_ERROR([Only one engine may be built into the memcached.
+
+Please note that you may use -E to load the engines you want.]))
 
 AC_ARG_ENABLE(dtrace,
   [AS_HELP_STRING([--enable-dtrace],[Enable dtrace probes])])
