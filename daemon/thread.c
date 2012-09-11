@@ -4,6 +4,7 @@
  */
 #include "config.h"
 #include "memcached.h"
+#include "network.h"
 #include <assert.h>
 #include <stdio.h>
 #include <errno.h>
@@ -321,7 +322,8 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     assert(me->type == GENERAL);
     CQ_ITEM *item;
 
-    if (recv(fd, devnull, sizeof(devnull), 0) == -1) {
+    int blocking;
+    if (recv_socket(fd, devnull, sizeof(devnull), &blocking) == -1) {
         if (settings.verbose > 0) {
             settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
                                             "Can't read from libevent pipe: %s\n",
@@ -710,7 +712,8 @@ void threads_shutdown(void)
 }
 
 void notify_thread(LIBEVENT_THREAD *thread) {
-    if (send(thread->notify[1], "", 1, 0) != 1) {
+    int blocking;
+    if (send_socket(thread->notify[1], "", 1, &blocking) != 1) {
         settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
                                         "Failed to notify thread: %s",
                                         strerror(errno));

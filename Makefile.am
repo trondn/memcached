@@ -97,6 +97,8 @@ memcached_SOURCES = \
                     daemon/hash.h \
                     daemon/memcached.c\
                     daemon/memcached.h \
+                    daemon/network.c \
+                    daemon/network.h \
                     daemon/sasl_defs.h \
                     daemon/stats.c \
                     daemon/stats.h \

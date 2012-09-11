@@ -18,6 +18,7 @@
 #include "memcached/extension_loggers.h"
 #include "alloc_hooks.h"
 #include "utilities/engine_loader.h"
+#include "network.h"
 
 #include <signal.h>
 #include <getopt.h>
@@ -387,27 +388,13 @@ static void disable_listen(void) {
     conn *next;
     for (next = listen_conn; next; next = next->next) {
         update_event(next, 0);
-        if (listen(next->sfd, 1) != 0) {
-            settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
-                                            "listen() failed",
-                                            strerror(errno));
-        }
+        listen_socket(next->sfd, 1);
     }
 }
 
 void safe_close(SOCKET sfd) {
     if (sfd != INVALID_SOCKET) {
-        int rval;
-        while ((rval = closesocket(sfd)) == SOCKET_ERROR &&
-               (errno == EINTR || errno == EAGAIN)) {
-            /* go ahead and retry */
-        }
-
-        if (rval == SOCKET_ERROR) {
-            settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
-                                            "Failed to close socket %d (%s)!!\n", (int)sfd,
-                                            strerror(errno));
-        } else {
+        if (close_socket(sfd) != SOCKET_ERROR) {
             STATS_LOCK();
             stats.curr_conns--;
             STATS_UNLOCK();
@@ -5178,7 +5165,8 @@ static enum try_read_result try_read_udp(conn *c) {
 
     c->request_addr_size = sizeof(c->request_addr);
     res = recvfrom(c->sfd, c->rbuf, c->rsize,
-                   0, (struct sockaddr *)&c->request_addr, &c->request_addr_size);
+                   0, (struct sockaddr *)&c->request_addr,
+                   &c->request_addr_size);
     if (res > 8) {
         unsigned char *buf = (unsigned char *)c->rbuf;
         STATS_ADD(c, bytes_read, res);
@@ -5249,7 +5237,8 @@ static enum try_read_result try_read_network(conn *c) {
         }
 
         int avail = c->rsize - c->rbytes;
-        res = recv(c->sfd, c->rbuf + c->rbytes, avail, 0);
+        int blocking;
+        res = recv_socket(c->sfd, c->rbuf + c->rbytes, avail, &blocking);
         if (res > 0) {
             STATS_ADD(c, bytes_read, res);
             gotdata = READ_DATA_RECEIVED;
@@ -5264,11 +5253,9 @@ static enum try_read_result try_read_network(conn *c) {
             return READ_ERROR;
         }
         if (res == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (blocking) {
                 break;
             }
-            settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
-                                            "%d Closing connection due to read error: %s", c->sfd, strerror(errno));
             return READ_ERROR;
         }
     }
@@ -5350,8 +5337,9 @@ static enum transmit_result transmit(conn *c) {
     if (c->msgcurr < c->msgused) {
         ssize_t res;
         struct msghdr *m = &c->msglist[c->msgcurr];
+        int blocking = 0;
 
-        res = sendmsg(c->sfd, m, 0);
+        res = sendmsg_socket(c, m, &blocking);
         if (res > 0) {
             STATS_ADD(c, bytes_written, res);
 
@@ -5371,7 +5359,7 @@ static enum transmit_result transmit(conn *c) {
             }
             return TRANSMIT_INCOMPLETE;
         }
-        if (res == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        if (res == -1 && blocking) {
             if (!update_event(c, EV_WRITE | EV_PERSIST)) {
                 if (settings.verbose > 0) {
                     settings.extensions.logger->log(EXTENSION_LOG_DEBUG, c,
@@ -5384,24 +5372,6 @@ static enum transmit_result transmit(conn *c) {
         }
         /* if res == 0 or res == -1 and error is not EAGAIN or EWOULDBLOCK,
            we have a real error, on which we close the connection */
-        if (settings.verbose > 0) {
-            if (res == -1) {
-                settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
-                                                "Failed to write, and not due to blocking: %s",
-                                                strerror(errno));
-            } else {
-                settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
-                                                "%d - sendmsg returned 0\n",
-                                                c->sfd);
-                for (int ii = 0; ii < m->msg_iovlen; ++ii) {
-                    settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
-                                                    "\t%d - %zu\n",
-                                                    c->sfd, m->msg_iov[ii].iov_len);
-                }
-
-            }
-        }
-
         if (IS_UDP(c->transport)) {
             conn_set_state(c, conn_read);
         } else {
@@ -5415,23 +5385,8 @@ static enum transmit_result transmit(conn *c) {
 
 bool conn_listening(conn *c)
 {
-    int sfd;
-    struct sockaddr_storage addr;
-    socklen_t addrlen = sizeof(addr);
-
-    if ((sfd = accept(c->sfd, (struct sockaddr *)&addr, &addrlen)) == -1) {
-        if (errno == EMFILE) {
-            if (settings.verbose > 0) {
-                settings.extensions.logger->log(EXTENSION_LOG_INFO, c,
-                                                "Too many open connections\n");
-            }
-            disable_listen();
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
-                                            "Failed to accept new client: %s\n",
-                                            strerror(errno));
-        }
-
+    SOCKET sfd = accept_socket(c, disable_listen);
+    if (sfd == INVALID_SOCKET) {
         return false;
     }
 
@@ -5626,7 +5581,10 @@ bool conn_swallow(conn *c) {
     }
 
     /*  now try reading from the socket */
-    res = recv(c->sfd, c->rbuf, c->rsize > c->sbytes ? c->sbytes : c->rsize, 0);
+    int blocking;
+    res = recv_socket(c->sfd, c->rbuf, c->rsize >
+                      c->sbytes ? c->sbytes : c->rsize,
+                      &blocking);
     if (res > 0) {
         STATS_ADD(c, bytes_read, res);
         c->sbytes -= res;
@@ -5636,7 +5594,7 @@ bool conn_swallow(conn *c) {
         conn_set_state(c, conn_closing);
         return true;
     }
-    if (res == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+    if (res == -1 && blocking) {
         if (!update_event(c, EV_READ | EV_PERSIST)) {
             if (settings.verbose > 0) {
                 settings.extensions.logger->log(EXTENSION_LOG_INFO, c,
@@ -5646,13 +5604,6 @@ bool conn_swallow(conn *c) {
             return true;
         }
         return false;
-    }
-
-    if (errno != ENOTCONN && errno != ECONNRESET) {
-        /* otherwise we have a real error, on which we close the connection */
-        settings.extensions.logger->log(EXTENSION_LOG_INFO, c,
-                                        "%d Failed to read, and not due to blocking (%s)\n",
-                                        c->sfd, strerror(errno));
     }
 
     conn_set_state(c, conn_closing);
@@ -5689,7 +5640,8 @@ bool conn_nread(conn *c) {
     }
 
     /*  now try reading from the socket */
-    res = recv(c->sfd, c->ritem, c->rlbytes, 0);
+    int blocking;
+    res = recv_socket(c->sfd, c->ritem, c->rlbytes, &blocking);
     if (res > 0) {
         STATS_ADD(c, bytes_read, res);
         if (c->rcurr == c->ritem) {
@@ -5699,12 +5651,13 @@ bool conn_nread(conn *c) {
         c->rlbytes -= res;
         return true;
     }
+
     if (res == 0) { /* end of stream */
         conn_set_state(c, conn_closing);
         return true;
     }
 
-    if (res == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+    if (res == -1 && blocking) {
         if (!update_event(c, EV_READ | EV_PERSIST)) {
             if (settings.verbose > 0) {
                 settings.extensions.logger->log(EXTENSION_LOG_INFO, c,
@@ -5716,16 +5669,6 @@ bool conn_nread(conn *c) {
         return false;
     }
 
-    if (errno != ENOTCONN && errno != ECONNRESET) {
-        /* otherwise we have a real error, on which we close the connection */
-        settings.extensions.logger->log(EXTENSION_LOG_WARNING, c,
-                                        "%d Failed to read, and not due to blocking:\n"
-                                        "errno: %d %s \n"
-                                        "rcurr=%lx ritem=%lx rbuf=%lx rlbytes=%d rsize=%d\n",
-                                        c->sfd, errno, strerror(errno),
-                                        (long)c->rcurr, (long)c->ritem, (long)c->rbuf,
-                                        (int)c->rlbytes, (int)c->rsize);
-    }
     conn_set_state(c, conn_closing);
     return true;
 }
@@ -5938,7 +5881,8 @@ void event_handler(const int fd, const short which, void *arg) {
 
 static void dispatch_event_handler(int fd, short which, void *arg) {
     char buffer[80];
-    ssize_t nr = recv(fd, buffer, sizeof(buffer), 0);
+    int blocking;
+    ssize_t nr = recv_socket(fd, buffer, sizeof(buffer), &blocking);
 
     if (nr != -1 && is_listen_disabled()) {
         bool enable = false;
@@ -5953,11 +5897,7 @@ static void dispatch_event_handler(int fd, short which, void *arg) {
             conn *next;
             for (next = listen_conn; next; next = next->next) {
                 update_event(next, EV_READ | EV_PERSIST);
-                if (listen(next->sfd, settings.backlog) != 0) {
-                    settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
-                                                    "listen() failed",
-                                                    strerror(errno));
-                }
+                listen(next->sfd, settings.backlog);
             }
         }
     }
@@ -6037,7 +5977,7 @@ static int server_socket(const char *interface,
                          int port,
                          enum network_transport transport,
                          FILE *portnumber_file) {
-    int sfd;
+    SOCKET sfd;
     struct linger ling = {0, 0};
     struct addrinfo *ai;
     struct addrinfo *next;
@@ -6114,11 +6054,9 @@ static int server_socket(const char *interface,
             }
         }
 
-        if (bind(sfd, next->ai_addr, next->ai_addrlen) == SOCKET_ERROR) {
-            if (errno != EADDRINUSE) {
-                settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
-                                                "bind(): %s",
-                                                strerror(errno));
+        int inuse = 0;
+        if (bind_socket(sfd, next->ai_addr, next->ai_addrlen, &inuse) == SOCKET_ERROR) {
+            if (inuse) {
                 safe_close(sfd);
                 freeaddrinfo(ai);
                 return 1;
@@ -6127,10 +6065,7 @@ static int server_socket(const char *interface,
             continue;
         } else {
             success++;
-            if (!IS_UDP(transport) && listen(sfd, settings.backlog) == SOCKET_ERROR) {
-                settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
-                                                "listen(): %s",
-                                                strerror(errno));
+            if (!IS_UDP(transport) && listen_socket(sfd, settings.backlog) == SOCKET_ERROR) {
                 safe_close(sfd);
                 freeaddrinfo(ai);
                 return 1;
@@ -6285,8 +6220,8 @@ static int server_sockets(int port, enum network_transport transport,
     }
 }
 
-static int new_socket_unix(void) {
-    int sfd;
+static SOCKET new_socket_unix(void) {
+    SOCKET sfd;
 
     if ((sfd = socket(AF_UNIX, SOCK_STREAM, 0)) == INVALID_SOCKET) {
         settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
@@ -6304,7 +6239,7 @@ static int new_socket_unix(void) {
 
 /* this will probably not work on windows */
 static int server_socket_unix(const char *path, int access_mask) {
-    int sfd;
+    SOCKET sfd;
     struct linger ling = {0, 0};
     struct sockaddr_un addr;
     struct stat tstat;
@@ -6341,19 +6276,14 @@ static int server_socket_unix(const char *path, int access_mask) {
     strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
     assert(strcmp(addr.sun_path, path) == 0);
     old_umask = umask( ~(access_mask&0777));
-    if (bind(sfd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
-        settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
-                                        "bind(): %s",
-                                        strerror(errno));
+    int inuse = 0;
+    if (bind_socket(sfd, (struct sockaddr *)&addr, sizeof(addr), &inuse) == SOCKET_ERROR) {
         safe_close(sfd);
         umask(old_umask);
         return 1;
     }
     umask(old_umask);
-    if (listen(sfd, settings.backlog) == -1) {
-        settings.extensions.logger->log(EXTENSION_LOG_WARNING, NULL,
-                                        "listen(): %s",
-                                        strerror(errno));
+    if (listen_socket(sfd, settings.backlog) == SOCKET_ERROR) {
         safe_close(sfd);
         return 1;
     }
