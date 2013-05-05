@@ -8,7 +8,7 @@
 #include <stdbool.h>
 #endif
 
-#ifdef __WIN32__
+#ifdef WIN32
 struct iovec {
     size_t iov_len;
     void* iov_base;
