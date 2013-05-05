@@ -1,4 +1,5 @@
 /* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+#include "config.h"
 #include <stdio.h>
 #include <windows.h>
 #include <dlfcn.h>
@@ -11,13 +12,14 @@
 static bool self = false;
 
 void* dlopen(const char* path, int mode) {
+    void *handle;
     if (path == NULL) {
         // We don't support opening ourself
         self = true;
         return NULL;
     }
 
-    void* handle = LoadLibrary(path);
+    handle = LoadLibrary(path);
     if (handle == NULL) {
         char *buf = malloc(strlen(path) + 20);
         sprintf(buf, "%s.dll", path);
@@ -41,12 +43,13 @@ int dlclose(void* handle) {
 static char dlerror_buf[200];
 
 const char *dlerror(void) {
+    DWORD err = GetLastError();
+    LPVOID error_msg;
+
     if (self) {
         return "not supported";
     }
 
-    DWORD err = GetLastError();
-    LPVOID error_msg;
     if (FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
                       FORMAT_MESSAGE_FROM_SYSTEM |
                       FORMAT_MESSAGE_IGNORE_INSERTS,

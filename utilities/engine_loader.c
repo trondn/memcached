@@ -34,7 +34,9 @@ bool load_engine(const char *soname,
     union my_hack {
         CREATE_INSTANCE create;
         void* voidptr;
-    } my_create = {.create = NULL };
+    } my_create;
+    void *symbol;
+    ENGINE_ERROR_CODE error;
 
     handle = dlopen(soname, RTLD_NOW | RTLD_LOCAL);
     if (handle == NULL) {
@@ -46,7 +48,7 @@ bool load_engine(const char *soname,
         return false;
     }
 
-    void *symbol = dlsym(handle, "create_instance");
+    symbol = dlsym(handle, "create_instance");
     if (symbol == NULL) {
         logger->log(EXTENSION_LOG_WARNING, NULL,
                 "Could not find symbol \"create_instance\" in %s: %s\n",
@@ -57,7 +59,7 @@ bool load_engine(const char *soname,
     my_create.voidptr = symbol;
 
     /* request a instance with protocol version 1 */
-    ENGINE_ERROR_CODE error = (*my_create.create)(1, get_server_api, &engine);
+    error = (*my_create.create)(1, get_server_api, &engine);
 
     if (error != ENGINE_SUCCESS || engine == NULL) {
         logger->log(EXTENSION_LOG_WARNING, NULL,
@@ -74,6 +76,7 @@ bool init_engine(ENGINE_HANDLE * engine,
                  EXTENSION_LOGGER_DESCRIPTOR *logger)
 {
     ENGINE_HANDLE_V1 *engine_v1 = NULL;
+    ENGINE_ERROR_CODE error;
 
     if (handle == NULL) {
         logger->log(EXTENSION_LOG_WARNING, NULL,
@@ -84,7 +87,7 @@ bool init_engine(ENGINE_HANDLE * engine,
     if (engine->interface == 1) {
         engine_v1 = (ENGINE_HANDLE_V1*)engine;
 
-        // validate that the required engine interface is implemented:
+        /* validate that the required engine interface is implemented: */
         if (engine_v1->get_info == NULL || engine_v1->initialize == NULL ||
             engine_v1->destroy == NULL || engine_v1->allocate == NULL ||
             engine_v1->remove == NULL || engine_v1->release == NULL ||
@@ -99,7 +102,7 @@ bool init_engine(ENGINE_HANDLE * engine,
             return false;
         }
 
-        ENGINE_ERROR_CODE error = engine_v1->initialize(engine,config_str);
+        error = engine_v1->initialize(engine,config_str);
         if (error != ENGINE_SUCCESS) {
             engine_v1->destroy(engine, false);
             logger->log(EXTENSION_LOG_WARNING, NULL,
@@ -124,6 +127,8 @@ void log_engine_details(ENGINE_HANDLE * engine,
     const engine_info *info;
     info = engine_v1->get_info(engine);
     if (info) {
+        ssize_t offset;
+        bool comma;
         char message[4096];
         ssize_t nw = snprintf(message, sizeof(message), "Loaded engine: %s\n",
                                         info->description ?
@@ -131,17 +136,18 @@ void log_engine_details(ENGINE_HANDLE * engine,
         if (nw == -1) {
             return;
         }
-        ssize_t offset = nw;
-        bool comma = false;
+        offset = nw;
+        comma = false;
 
         if (info->num_features > 0) {
+            int ii;
             nw = snprintf(message + offset, sizeof(message) - offset,
                           "Supplying the following features: ");
             if (nw == -1) {
                 return;
             }
             offset += nw;
-            for (int ii = 0; ii < info->num_features; ++ii) {
+            for (ii = 0; ii < info->num_features; ++ii) {
                 if (info->features[ii].description != NULL) {
                     nw = snprintf(message + offset, sizeof(message) - offset,
                                   "%s%s", comma ? ", " : "",
