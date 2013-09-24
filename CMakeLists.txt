@@ -35,6 +35,8 @@ ELSE (WIN32)
    ADD_EXECUTABLE(timedrun programs/timedrun.c)
 ENDIF (WIN32)
 
+ADD_SUBDIRECTORY(engines)
+
 #
 # Use TCMalloc if we have it
 #
